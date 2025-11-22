@@ -1,0 +1,5 @@
+{
+  "name": "TradeView Analytics DB",
+  "description": "A professional trading dashboard visualizing market data, trades, and pivot points from a data source using Lightweight Charts.",
+  "requestFramePermissions": []
+}
