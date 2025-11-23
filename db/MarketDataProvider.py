@@ -27,41 +27,81 @@ class MarketDataProvider:
         self.ema_slow_span = 26
 
     def _load_kraken_asset_pairs(self):
+        """Scarica le coppie da Kraken e costruisce la mappa di risoluzione e metadati."""
         try:
             response = self.k.query_public('AssetPairs')
             if response.get('error'): return
 
             results = response['result']
             for pair_id, info in results.items():
-                wsname = info.get('wsname')
-                altname = info.get('altname')
+                wsname = info.get('wsname') # Es: XBT/EUR
+                altname = info.get('altname') # Es: XBTEUR
 
+                # 1. Mappatura ID Ufficiali
                 self.kraken_pairs_map[pair_id] = pair_id
-                if wsname: self.kraken_pairs_map[wsname] = pair_id
-                if altname: self.kraken_pairs_map[altname] = pair_id
+                if wsname:
+                    self.kraken_pairs_map[wsname] = pair_id
+                    # --- FIX BTC: Se c'è XBT, mappa anche BTC ---
+                    if 'XBT' in wsname:
+                        btc_alias = wsname.replace('XBT', 'BTC') # BTC/EUR -> pair_id
+                        self.kraken_pairs_map[btc_alias] = pair_id
 
+                if altname:
+                    self.kraken_pairs_map[altname] = pair_id
+
+                # 2. Salvataggio Metadati
                 self.pair_metadata[pair_id] = {
                     'base': info.get('base'),
                     'quote': info.get('quote'),
                     'wsname': wsname,
-                    'altname': altname
+                    'altname': altname,
+                    # Dati Pair Limits
+                    'lot_decimals': info.get('lot_decimals'),
+                    'pair_decimals': info.get('pair_decimals'),
+                    'ordermin': info.get('ordermin'),
+                    'leverage_buy': info.get('leverage_buy', []),
+                    'leverage_sell': info.get('leverage_sell', []),
+                    'fees': info.get('fees', []),
+                    'fees_maker': info.get('fees_maker', []),
+                    'fee_volume_currency': info.get('fee_volume_currency')
                 }
         except Exception:
             pass
 
     def _get_kraken_id(self, pair: str) -> str:
-        return self.kraken_pairs_map.get(pair, pair)
+        """Restituisce l'ID ufficiale Kraken gestendo alias BTC/XBT."""
+        # 1. Cerca match esatto
+        if pair in self.kraken_pairs_map:
+            return self.kraken_pairs_map[pair]
 
-    def getPair(self, pair: str) -> Dict[str, str]:
+        # 2. Fallback manuale: se input ha BTC, prova con XBT
+        if "BTC" in pair:
+            xbt_variant = pair.replace("BTC", "XBT")
+            if xbt_variant in self.kraken_pairs_map:
+                return self.kraken_pairs_map[xbt_variant]
+
+        return pair
+
+    def getPair(self, pair: str) -> Dict[str, Any]:
         k_id = self._get_kraken_id(pair)
         meta = self.pair_metadata.get(k_id, {})
+
+        # Se meta è vuoto, significa che l'ID non è stato trovato correttamente
+        if not meta:
+            return {
+                "base": "N/A", "quote": "N/A", "pair": pair,
+                "kr_pair": k_id, "pair_limits": None
+            }
 
         base_clean = "N/A"
         quote_clean = "N/A"
         human_pair = meta.get('wsname', pair)
 
+        # Logica pulizia nomi (XBT -> BTC, ZEUR -> EUR)
         if human_pair and '/' in human_pair:
             base_clean, quote_clean = human_pair.split('/')
+            # Forziamo BTC visuale se Kraken dice XBT
+            if base_clean == 'XBT': base_clean = 'BTC'
         else:
             raw_base = meta.get('base', '')
             raw_quote = meta.get('quote', '')
@@ -78,11 +118,31 @@ class MarketDataProvider:
             if base_clean and quote_clean:
                 human_pair = f"{base_clean}/{quote_clean}"
 
+        # --- COSTRUZIONE PAIR LIMITS ---
+        lev_buy = meta.get('leverage_buy', [])
+        lev_sell = meta.get('leverage_sell', [])
+
+        pair_limits = {
+            "lot_decimals": meta.get('lot_decimals'),
+            "pair_decimals": meta.get('pair_decimals'),
+            "ordermin": meta.get('ordermin'),
+            "fee_volume_currency": meta.get('fee_volume_currency'),
+            "fees": meta.get('fees', []),
+            "fees_maker": meta.get('fees_maker', []),
+            "leverage_buy": lev_buy,
+            "leverage_sell": lev_sell,
+            "leverage_buy_max": max(lev_buy) if lev_buy else 0,
+            "leverage_sell_max": max(lev_sell) if lev_sell else 0,
+            "can_leverage_buy": bool(lev_buy),
+            "can_leverage_sell": bool(lev_sell)
+        }
+
         return {
             "base": base_clean,
             "quote": quote_clean,
             "pair": human_pair,
-            "kr_pair": k_id
+            "kr_pair": k_id,
+            "pair_limits": pair_limits
         }
 
     def _get_yahoo_ticker(self, pair: str) -> str:
@@ -99,15 +159,11 @@ class MarketDataProvider:
 
     def _parse_timedelta(self, duration_str: str) -> Optional[datetime.timedelta]:
         """Converte stringhe come '1h', '30m', '1d' in timedelta."""
-        if not duration_str or len(duration_str) < 2:
-            return None
-
+        if not duration_str or len(duration_str) < 2: return None
         unit = duration_str[-1].lower()
         try:
             value = int(duration_str[:-1])
-        except ValueError:
-            return None
-
+        except ValueError: return None
         if unit == 'm': return datetime.timedelta(minutes=value)
         if unit == 'h': return datetime.timedelta(hours=value)
         if unit == 'd': return datetime.timedelta(days=value)
@@ -115,12 +171,6 @@ class MarketDataProvider:
         return None
 
     def getCandles(self, pair: str, interval: str, range_period: str = "1mo", truncate_to: str = None) -> List[Dict[str, Any]]:
-        """
-        Recupera le candele.
-        :param truncate_to: (Opzionale) Stringa es. '4h', '12h'. Se presente, taglia i risultati
-                            mantenendo solo quelli più recenti di questo lasso di tempo.
-        """
-
         # CASO 1: REAL TIME
         if interval.lower() == 'now':
             return self._fetch_kraken_now(pair)
@@ -138,7 +188,6 @@ class MarketDataProvider:
                         data = df
                         if 'Close' not in data.columns and 'Price' in data.columns:
                             data.rename(columns={'Price': 'Close'}, inplace=True)
-
                         if interval == '4h' and yf_interval == '1h':
                             data = self._resample_data(data, '4h')
             except Exception:
@@ -157,35 +206,23 @@ class MarketDataProvider:
         col_map = {'Date': 'timestamp', 'Datetime': 'timestamp', 'index': 'timestamp'}
         data.rename(columns=col_map, inplace=True)
 
-        # --- NUOVA LOGICA TRUNCATE (Sul DataFrame) ---
         if truncate_to:
             delta = self._parse_timedelta(truncate_to)
             if delta:
-                # 1. Assicuriamoci che la colonna sia datetime
                 data['timestamp'] = pd.to_datetime(data['timestamp'])
-
-                # 2. Standardizzazione Timezone a UTC per confronto
                 if data['timestamp'].dt.tz is None:
                     data['timestamp'] = data['timestamp'].dt.tz_localize('UTC')
                 else:
                     data['timestamp'] = data['timestamp'].dt.tz_convert('UTC')
-
-                # 3. Calcolo Cutoff
                 cutoff_time = pd.Timestamp.now(tz='UTC') - delta
-
-                # 4. Filtro DataFrame
                 data = data[data['timestamp'] >= cutoff_time]
 
-        # Converti a stringa per output finale
         data['timestamp'] = data['timestamp'].astype(str)
-
         result = data.to_dict(orient='records')
 
         final_list = []
         for row in result:
             clean_row = {k.lower(): v for k, v in row.items()}
-
-            # Popolamento dati mancanti
             if 'bid' not in clean_row or clean_row['bid'] is None:
                 close_p = clean_row.get('close', 0)
                 high_p = clean_row.get('high', 0)
@@ -193,11 +230,7 @@ class MarketDataProvider:
                 clean_row['bid'] = close_p
                 clean_row['ask'] = close_p
                 clean_row['last'] = close_p
-                if high_p and low_p:
-                    clean_row['mid'] = (high_p + low_p) / 2
-                else:
-                    clean_row['mid'] = close_p
-
+                clean_row['mid'] = (high_p + low_p) / 2 if (high_p and low_p) else close_p
             final_list.append(clean_row)
 
         return final_list
@@ -307,9 +340,7 @@ class MarketDataProvider:
                 granularity = 0.0
             analyzed_lists.append((granularity, clist))
 
-        # Ordina per granularità crescente (il più grande vince)
         analyzed_lists.sort(key=lambda x: x[0], reverse=False)
-
         merged_dict = {}
         for granularity, clist in analyzed_lists:
             for candle in clist:
@@ -350,9 +381,7 @@ class MarketDataProvider:
 
             def fmt(v, is_vol=False):
                 if v is None: return "-"
-                if is_vol:
-                    if v > 1000: return f"{v:,.2f}"
-                    return f"{v:.4f}"
+                if is_vol: return f"{v:,.2f}" if v > 1000 else f"{v:.4f}"
                 return f"{v:.2f}" if v > 10 else f"{v:.5f}"
 
             row_col = GREEN if cl >= o else RED
@@ -365,33 +394,94 @@ class MarketDataProvider:
             print(f"{ts:<20} {fmt(o):<10} {fmt(h):<10} {fmt(l):<10} {row_col}{fmt(cl):<10}{RESET} {fmt(vol, True):<15} {fmt(bid):<10} {fmt(ask):<10} {fmt(mid):<10} {ema_str}")
         print("-" * 150 + "\n")
 
+
+    # =========================================================
+    # NUOVO METODO: GET ALL PAIRS
+    # =========================================================
+    def getAllPairs(self, quote_filter: str = "EUR", leverage_only: bool = False) -> List[Dict[str, Any]]:
+        """
+        Restituisce una lista con i dettagli delle coppie disponibili su Kraken.
+
+        :param quote_filter: Filtra per valuta quote (default "EUR"). Se None, restituisce tutto.
+        :param leverage_only: Se True, restituisce solo coppie con leva (Buy AND Sell).
+        """
+        if not self.pair_metadata:
+            self._load_kraken_asset_pairs()
+
+        all_pairs = []
+        seen_ids = set()
+
+        for k_id in self.pair_metadata:
+            if k_id in seen_ids: continue
+
+            try:
+                pair_data = self.getPair(k_id)
+
+                # 1. Filtro Validità base
+                if pair_data['base'] == "N/A" or pair_data['quote'] == "N/A":
+                    continue
+
+                # 2. Filtro Quote (es. solo EUR)
+                if quote_filter and pair_data['quote'] != quote_filter:
+                    continue
+
+                # 3. Filtro Leva (Opzionale)
+                if leverage_only:
+                    limits = pair_data.get('pair_limits', {})
+                    can_buy = limits.get('can_leverage_buy', False)
+                    can_sell = limits.get('can_leverage_sell', False)
+                    if not (can_buy and can_sell):
+                        continue
+
+                all_pairs.append(pair_data)
+                seen_ids.add(k_id)
+            except Exception:
+                continue
+
+        return all_pairs
+
 if __name__ == "__main__":
     provider = MarketDataProvider()
 
     print("--- SCARICO DATI ---")
     # Nota: Yahoo 15m su lunghi periodi (1mo) spesso fallisce o limita a 60gg.
     # Per 4h su 5gg ora dovresti vedere i salti di 4 ore nei timestamp
-    data_1d = provider.getCandles("XBT/EUR", "1d", "1mo")
-    data_4h = provider.getCandles("XBT/EUR", "4h", "5d")
-    data_1h = provider.getCandles("XBT/EUR", "1h", "1d", truncate_to="6h")
-    data_15m = provider.getCandles("XBT/EUR", "15m", "1d", truncate_to="2h")
-    data_5m = provider.getCandles("XBT/EUR", "5m", "1d", truncate_to="30m")
-    data_now = provider.getCandles("XBT/EUR", "now")
+    # data_1d = provider.getCandles("XBT/EUR", "1d", "1mo")
+    # data_4h = provider.getCandles("XBT/EUR", "4h", "5d")
+    # data_1h = provider.getCandles("XBT/EUR", "1h", "1d", truncate_to="6h")
+    # data_15m = provider.getCandles("XBT/EUR", "15m", "1d", truncate_to="2h")
+    # data_5m = provider.getCandles("XBT/EUR", "5m", "1d", truncate_to="30m")
+    # data_now = provider.getCandles("XBT/EUR", "now")
 
-    print(f"1D Candles: {len(data_1d)}")
-    print(f"4H Candles (Resampled): {len(data_4h)}") # Dovrebbero essere circa 30 (5gg * 6 candele)
-    print(f"1H Candles: {len(data_1h)}")
-    print(f"15M Candles: {len(data_15m)}")
+    # print(f"1D Candles: {len(data_1d)}")
+    # print(f"4H Candles (Resampled): {len(data_4h)}") # Dovrebbero essere circa 30 (5gg * 6 candele)
+    # print(f"1H Candles: {len(data_1h)}")
+    # print(f"15M Candles: {len(data_15m)}")
 
-    print("\n--- MERGE (Priority: Now > 15m > 1h > 4h > 1d) ---")
-    merged_data = provider.merge_candles_data(data_1d, data_4h, data_1h, data_15m, data_5m, data_now)
+    # print("\n--- MERGE (Priority: Now > 15m > 1h > 4h > 1d) ---")
+    # merged_data = provider.merge_candles_data(data_1d, data_4h, data_1h, data_15m, data_5m, data_now)
 
-    print(f"Total Merged: {len(merged_data)}")
+    # print(f"Total Merged: {len(merged_data)}")
 
-    print("\n--- ULTIMI 20 RECORD MERGED ---")
-    provider.print_candles(merged_data)
+    # print("\n--- ULTIMI 20 RECORD MERGED ---")
+    # provider.print_candles(merged_data)
 
-    print("\n--- TEST GET PAIR ---")
-    print(provider.getPair("BTC/EUR"))  # Deve dare BTC/EUR, XXBTZEUR
-    print(provider.getPair("YFI/EUR"))   # Deve dare YFI/EUR, YFIEUR (se esiste)
+    # print("\n--- TEST GET PAIR ---")
+    # print(provider.getPair("XBT/EUR"))  # Deve dare BTC/EUR, XXBTZEUR
+    # print(provider.getPair("YFI/EUR"))   # Deve dare YFI/EUR, YFIEUR (se esiste)
+    all_pairs = provider.getAllPairs(quote_filter="EUR", leverage_only=True)
+    print(f"Trovate {len(all_pairs)} coppie totali su Kraken.")
 
+    # Stampa le prime 3 per esempio
+    for p in all_pairs:
+        print(f" - {p['pair']} (ID: {p['kr_pair']}) -> Min Order: {p['pair_limits']['ordermin']}")
+        data_1d = provider.getCandles(p['pair'], "1d", "1mo", truncate_to="30d")
+        data_4h = provider.getCandles(p['pair'], "4h", "5d", truncate_to="5d")
+        data_1h = provider.getCandles(p['pair'], "1h", "1d", truncate_to="6h")
+        data_15m = provider.getCandles(p['pair'], "15m", "1d", truncate_to="2h")
+        data_5m = provider.getCandles(p['pair'], "5m", "1d", truncate_to="30m")
+        data_now = provider.getCandles(p['pair'], "now")
+        merged_data = provider.merge_candles_data(data_1d, data_4h, data_1h, data_15m, data_5m, data_now)
+        provider.print_candles(merged_data)
+        print(f" - {p['pair']} (ID: {p['kr_pair']}) -> Min Order: {p['pair_limits']['ordermin']}")
+        # print("\n--- ULTIMI 20 RECORD MERGED ---")
