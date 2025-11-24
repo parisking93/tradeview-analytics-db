@@ -1,216 +1,271 @@
 import os
-import time
 import torch
 import numpy as np
 import pandas as pd
 import timesfm
 from sklearn.preprocessing import StandardScaler
-from typing import List, Dict, Any, Tuple, Optional
+from typing import List, Dict, Any
 
 class TimeSfmForecaster:
     def __init__(self, context_len: int = 512):
         """
-        Inizializza il modello TimeSfm 2.5 (500M Parameters).
+        Inizializza TimeSfm 2.5 (Versione 200M).
+        Versione Legacy con supporto Frequenza temporale.
         """
-        self.repo_id = "google/timesfm-2.5-500m-pytorch"
+        self.repo_id = "google/timesfm-2.5-200m-pytorch"
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.context_len = context_len
-        
-        print(f"[TimeSfm] Loading model {self.repo_id} on {self.device}...")
-        
+
+        self.ema_fast_span = 12
+        self.ema_slow_span = 26
+
+        print(f"[TimeSfm] Loading {self.repo_id} on {self.device}...")
+
         try:
-            self.model = timesfm.TimesFm(
-                hparams=timesfm.TimesFmHparams(
+            # --- GESTIONE CLASSE LEGACY ---
+            if hasattr(timesfm, "TimesFM_2p5_200M_torch"):
+                print("[TimeSfm] Found legacy class 'TimesFM_2p5_200M_torch'. Using it.")
+
+                self.model = timesfm.TimesFM_2p5_200M_torch.from_pretrained(self.repo_id)
+                if hasattr(self.model, "to"):
+                    self.model.to(self.device)
+
+                # Configurazione esplicita (richiesta dalla legacy)
+                print("[TimeSfm] Creating ForecastConfig...")
+                config = timesfm.ForecastConfig(
+                    max_context=self.context_len,
+                    max_horizon=128,
+                    normalize_inputs=True,
+                    use_continuous_quantile_head=True,
+                    force_flip_invariance=True,
+                    infer_is_positive=True,
+                    fix_quantile_crossing=True,
+                )
+
+                print("[TimeSfm] Compiling model with config...")
+                self.model.compile(config)
+                self.use_legacy = True
+
+            # --- GESTIONE NUOVA API ---
+            else:
+                print("[TimeSfm] Legacy class not found. Using new 'TimesFm' class.")
+                self.model = timesfm.TimesFm(
+                    context_len=self.context_len,
                     backend=self.device,
                     per_core_batch_size=32,
-                    context_len=self.context_len,
-                ),
-                checkpoint=timesfm.TimesFmCheckpoint(
-                    huggingface_repo_id=self.repo_id
+                    horizon_len=128
                 )
-            )
-        except AttributeError:
-            self.model = timesfm.TimesFM_2p5_500M_torch.from_pretrained(self.repo_id)
-            if self.device == "cuda":
-                self.model.cuda()
+                self.model.load_from_checkpoint(repo_id=self.repo_id)
+                self.use_legacy = False
 
-        print("[TimeSfm] Model loaded.")
+            print(f"[TimeSfm] Model loaded and COMPILED successfully on {self.device}.")
+
+        except Exception as e:
+            print(f"\n[TimeSfm] CRITICAL ERROR during init: {e}")
+            raise e
 
     def predict_candles(self, candles: List[Dict[str, Any]], timeframe: str, horizon: int) -> List[Dict[str, Any]]:
-        """
-        Advanced Forecasting con Log-Returns e Covariates (RSI, ATR).
-        """
-        if not candles or len(candles) < 20:
-            print("[TimeSfm] Error: Not enough candles for context.")
+        if not candles or len(candles) < 30:
             return []
 
-        # 1. Preparazione DataFrame
+        # 1. Preparazione Dati
         df = pd.DataFrame(candles)
         if 'timestamp' in df.columns:
             df['timestamp'] = pd.to_datetime(df['timestamp'])
             df.sort_values('timestamp', inplace=True)
-        
-        # Riempimento valori nulli (FFill per gestire i 'None' del realtime)
-        for col in ['close', 'high', 'low', 'volume', 'rsi', 'atr']:
-            if col in df.columns:
-                df[col] = df[col].astype(float).fillna(method='ffill').fillna(0)
 
-        # Dati Reali Finali (per ricostruzione)
-        last_real_close = df['close'].iloc[-1]
-        last_real_high = df['high'].iloc[-1]
-        last_real_low = df['low'].iloc[-1]
-        last_real_ts = df['timestamp'].iloc[-1]
+        # Pulizia
+        cols = ['close', 'high', 'low', 'volume', 'rsi', 'atr']
+        for c in cols:
+            if c in df.columns:
+                df[c] = df[c].astype(float).ffill().fillna(0)
 
-        # --- FEATURE ENGINEERING (Log Returns & Scaling) ---
-        # Usiamo Log Returns per stazionarietà: ln(P_t / P_{t-1})
-        
-        close_series = df['close'].values
-        close_log_ret = np.log(close_series[1:] / close_series[:-1])
-        
-        high_series = df['high'].values
-        high_log_ret = np.log(high_series[1:] / high_series[:-1])
+        # Ultimo stato
+        last_row = df.iloc[-1]
+        last_ts = last_row['timestamp']
+        last_spread = last_row.get('spread', last_row['close'] * 0.0001)
+        if pd.isna(last_spread) or last_spread == 0: last_spread = last_row['close'] * 0.0001
 
-        low_series = df['low'].values
-        low_log_ret = np.log(low_series[1:] / low_series[:-1])
+        # --- FEATURE ENGINEERING ---
+        def get_log_ret(series):
+            vals = series.values
+            return np.log(vals[1:] / vals[:-1])
 
-        vol_series = df['volume'].values[1:] 
-        vol_log = np.log1p(vol_series)
+        close_log = get_log_ret(df['close'])
+        high_log = get_log_ret(df['high'])
+        low_log = get_log_ret(df['low'])
+        vol_log = np.log1p(df['volume'].values[1:])
+        rsi_vals = df['rsi'].values[1:]
+        atr_vals = df['atr'].values[1:]
 
-        rsi_series = df['rsi'].values[1:]
-        atr_series = df['atr'].values[1:]
-
-        # Taglio al context length
-        def tail(arr): return arr[-self.context_len:] if len(arr) > self.context_len else arr
-        
-        input_close = tail(close_log_ret)
-        input_high = tail(high_log_ret)
-        input_low = tail(low_log_ret)
-        input_vol = tail(vol_log)
-        input_rsi = tail(rsi_series)
-        input_atr = tail(atr_series)
-
-        # Scaling
+        # --- SCALING ---
         scalers = [StandardScaler() for _ in range(6)]
-        
-        norm_close = scalers[0].fit_transform(input_close.reshape(-1, 1)).flatten()
-        norm_high  = scalers[1].fit_transform(input_high.reshape(-1, 1)).flatten()
-        norm_low   = scalers[2].fit_transform(input_low.reshape(-1, 1)).flatten()
-        norm_vol   = scalers[3].fit_transform(input_vol.reshape(-1, 1)).flatten()
-        norm_rsi   = scalers[4].fit_transform(input_rsi.reshape(-1, 1)).flatten()
-        norm_atr   = scalers[5].fit_transform(input_atr.reshape(-1, 1)).flatten()
+        inputs_list = [close_log, high_log, low_log, vol_log, rsi_vals, atr_vals]
 
-        # Batch Input: [Close, High, Low, Vol, RSI, ATR]
-        inputs = [norm_close, norm_high, norm_low, norm_vol, norm_rsi, norm_atr]
+        prepared_inputs = []
+        for i, arr in enumerate(inputs_list):
+            scaled = scalers[i].fit_transform(arr.reshape(-1, 1)).flatten()
+            if len(scaled) > self.context_len:
+                scaled = scaled[-self.context_len:]
+            prepared_inputs.append(scaled)
 
-        # 2. INFERENCE
-        p50_raw, _, _ = self._run_inference(inputs, horizon)
+        min_len = min(len(x) for x in prepared_inputs)
+        # Shape: (Batch=6, Time)
+        inputs_np = np.array([x[-min_len:] for x in prepared_inputs], dtype=np.float32)
 
-        # 3. DENORMALIZZAZIONE & RICOSTRUZIONE
+        # --- GESTIONE FREQUENZA (TEMPO) ---
+        # Mappiamo il timeframe stringa (es "15m") nel codice intero di TimeSfm
+        # 0: High freq, 1: Minutes, 2: Hours, 3: Days, 4: Weeks, 5: Months
+        freq_map = {
+            'm': 1, # 1m, 5m, 15m, 30m
+            'h': 2, # 1h, 4h
+            'd': 3, # 1d
+            'w': 4, # 1wk
+            'M': 5  # 1mo
+        }
+        # Estraiamo l'unità (l'ultimo carattere, es 'm' da '15m')
+        unit_char = timeframe[-1] if timeframe and timeframe[-1].isalpha() else 'm'
+        freq_val = freq_map.get(unit_char, 1) # Default a minuti (1) se non trovato
+
+        # Creiamo un array di frequenze grande quanto il batch (6)
+        # Ogni serie temporale (Close, High, Low...) ha la stessa frequenza
+        freq_input = np.full((inputs_np.shape[0],), freq_val, dtype=np.int32)
+
+        # --- INFERENZA ---
+        try:
+            if self.use_legacy:
+                with torch.no_grad():
+                    # Passiamo inputs E freq
+                    try:
+                        p_forecast, _ = self.model.forecast(
+                            inputs=inputs_np,
+                            freq=freq_input,  # <--- QUI passiamo il tempo
+                            horizon=horizon
+                        )
+                    except TypeError:
+                        # Fallback se la versione legacy specifica installata non supporta freq
+                        print("[TimeSfm] Warning: This legacy version ignores 'freq'. Running without it.")
+                        p_forecast, _ = self.model.forecast(inputs=inputs_np, horizon=horizon)
+            else:
+                # Nuova API
+                p_forecast, _ = self.model.forecast(
+                    inputs=inputs_np,
+                    freq=freq_input,
+                    horizon=horizon
+                )
+
+            if hasattr(p_forecast, 'cpu'):
+                p_forecast = p_forecast.cpu().numpy()
+
+            if len(p_forecast.shape) == 3:
+                p_forecast = p_forecast[0]
+
+        except Exception as e:
+            print(f"[TimeSfm] Error during inference: {e}")
+            return []
+
+        # --- RICOSTRUZIONE ---
         future_candles = []
         time_delta = self._parse_timeframe_pandas(timeframe)
-        current_ts = last_real_ts
-        
-        curr_close = last_real_close
-        curr_high = last_real_high
-        curr_low = last_real_low
+        current_ts = last_ts
+
+        curr = {
+            'close': last_row['close'],
+            'high': last_row['high'],
+            'low': last_row['low']
+        }
 
         for i in range(horizon):
             current_ts += time_delta
 
-            # Denormalizza
-            pred_close_ret = scalers[0].inverse_transform(p50_raw[0][i].reshape(1, -1))[0,0]
-            pred_high_ret  = scalers[1].inverse_transform(p50_raw[1][i].reshape(1, -1))[0,0]
-            pred_low_ret   = scalers[2].inverse_transform(p50_raw[2][i].reshape(1, -1))[0,0]
-            pred_vol_log   = scalers[3].inverse_transform(p50_raw[3][i].reshape(1, -1))[0,0]
-            pred_rsi       = scalers[4].inverse_transform(p50_raw[4][i].reshape(1, -1))[0,0]
-            pred_atr       = scalers[5].inverse_transform(p50_raw[5][i].reshape(1, -1))[0,0]
+            def denorm(idx, val):
+                return scalers[idx].inverse_transform(val.reshape(1, -1))[0,0]
 
-            # Ricostruzione
-            next_open = curr_close
-            next_close = curr_close * np.exp(pred_close_ret)
-            
-            # High & Low indipendenti (trend follower)
-            next_high = curr_high * np.exp(pred_high_ret)
-            next_low = curr_low * np.exp(pred_low_ret)
+            # Denormalizzazione
+            ret_close = denorm(0, p_forecast[0][i])
+            ret_high = denorm(1, p_forecast[1][i])
+            ret_low = denorm(2, p_forecast[2][i])
+            val_vol = denorm(3, p_forecast[3][i])
+            val_rsi = denorm(4, p_forecast[4][i])
+            val_atr = denorm(5, p_forecast[5][i])
 
-            next_vol = max(0, np.expm1(pred_vol_log))
+            # Applicazione log-returns
+            next_close = curr['close'] * np.exp(ret_close)
+            next_high = curr['high'] * np.exp(ret_high)
+            next_low = curr['low'] * np.exp(ret_low)
+            next_vol = max(0, np.expm1(val_vol))
 
-            # Geometria Candela
-            final_high = max(next_high, next_open, next_close)
-            final_low = min(next_low, next_open, next_close)
+            # Geometria candela coerente
+            final_high = max(next_high, last_row['close'], next_close)
+            final_low = min(next_low, last_row['close'], next_close)
 
-            curr_close = next_close
-            curr_high = final_high
-            curr_low = final_low
+            curr['close'] = next_close
+            curr['high'] = final_high
+            curr['low'] = final_low
 
-            future_candles.append({
+            bid = next_close - (last_spread/2)
+            ask = next_close + (last_spread/2)
+
+            candle = {
                 'timestamp': current_ts.isoformat(),
                 'pair': candles[0].get('pair', 'N/A'),
-                'open': next_open,
+                'open': last_row['close'],
                 'high': final_high,
                 'low': final_low,
                 'close': next_close,
                 'volume': next_vol,
-                'rsi': pred_rsi,
-                'atr': pred_atr,
+                'spread': last_spread,
+                'bid': bid,
+                'ask': ask,
+                'mid': next_close,
+                'last': next_close,
+                'rsi': val_rsi,
+                'atr': val_atr,
+                'ema_fast': 0, 'ema_slow': 0,
                 'type': 'forecast'
-            })
+            }
+            future_candles.append(candle)
+            last_row = pd.Series(candle)
+
+        # Ricalcolo EMA
+        df_fut = pd.DataFrame(future_candles)
+        df_fut['timestamp'] = pd.to_datetime(df_fut['timestamp'])
+        full = pd.concat([df[['timestamp','close']], df_fut[['timestamp','close']]], ignore_index=True)
+        full['f'] = full['close'].ewm(span=self.ema_fast_span).mean()
+        full['s'] = full['close'].ewm(span=self.ema_slow_span).mean()
+
+        res_emas = full.iloc[-horizon:].reset_index(drop=True)
+        for i, c in enumerate(future_candles):
+            c['ema_fast'] = float(res_emas.iloc[i]['f'])
+            c['ema_slow'] = float(res_emas.iloc[i]['s'])
 
         return future_candles
 
-    def _run_inference(self, inputs: List[np.ndarray], horizon: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        # Conversione sicura in Batch Numpy Array
-        # Shape diventa: (6, context_len) -> 6 canali trattati come batch paralleli
-        inputs_np = np.stack([x.astype(np.float32) for x in inputs])
-        
-        # freq=0 -> integer index
-        point, quants = self.model.forecast(inputs=inputs_np, horizon=horizon, freq=0)
-
-        if hasattr(point, 'cpu'): point = point.cpu().numpy()
-        if hasattr(quants, 'cpu'): quants = quants.cpu().numpy()
-
-        p50 = point
-        # Placeholder quantili
-        p10 = p50 * 0.99
-        p90 = p50 * 1.01
-        
-        return p50, p10, p90
-
     def _parse_timeframe_pandas(self, tf: str) -> pd.Timedelta:
-        map_tf = {'m': 'min', 'h': 'H', 'd': 'D', 'w': 'W', 'mo': 'M'}
-        if not tf: return pd.Timedelta(minutes=5)
-        unit_char = tf[-1].lower()
         try:
+            unit = tf[-1]
             val = int(tf[:-1])
-            pd_unit = map_tf.get(unit_char, 'min')
-            return pd.Timedelta(value=val, unit=pd_unit)
+            map_tf = {'m':'min', 'h':'H', 'd':'D', 'w':'W'}
+            return pd.Timedelta(value=val, unit=map_tf.get(unit, 'min'))
         except:
             return pd.Timedelta(minutes=5)
 
 if __name__ == "__main__":
-    # Test Standalone
-    print("--- TEST STANDALONE ---")
-    fake_candles = []
-    price = 50000.0
-    vol = 1000.0
+    print("--- TEST TIMESFM WITH FREQ ---")
+    fake = []
+    p = 50000.0
     ts = pd.Timestamp.now()
-    
     for i in range(100):
-        price = price * (1 + np.random.normal(0, 0.001)) 
-        high = price * 1.002
-        low = price * 0.998
-        vol = abs(vol + np.random.normal(0, 100))
-        
-        fake_candles.append({
-            'timestamp': (ts + pd.Timedelta(minutes=15*i)).isoformat(),
-            'open': price, 'high': high, 'low': low, 'close': price,
-            'volume': vol, 'rsi': 50 + np.random.normal(0, 5), 'atr': 50.0,
-            'pair': 'BTC/EUR'
+        p *= (1 + np.random.normal(0,0.001))
+        fake.append({
+            'timestamp': (ts + pd.Timedelta(minutes=5*i)).isoformat(),
+            'close': p, 'high': p*1.001, 'low': p*0.999, 'volume': 100,
+            'rsi': 50, 'atr': 50, 'pair': 'BTC/EUR'
         })
 
     forecaster = TimeSfmForecaster()
-    forecasts = forecaster.predict_candles(fake_candles, "15m", horizon=5)
-
+    # Testiamo con 15 minuti (freq=1)
+    res = forecaster.predict_candles(fake, "5m", 20)
     print("\n--- PREVISIONI ---")
-    for f in forecasts:
+    for f in res:
         print(f"TS: {f['timestamp']} | O: {f['open']:.2f} C: {f['close']:.2f} H: {f['high']:.2f} L: {f['low']:.2f}| RSI: {f['rsi']:.1f}")
