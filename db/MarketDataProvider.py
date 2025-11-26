@@ -4,7 +4,7 @@ import os
 import time
 import datetime
 import pandas as pd
-import numpy as np  # Aggiunto per calcoli RSI/ATR
+import numpy as np  # Necessario per i calcoli vettoriali
 import yfinance as yf
 import krakenex
 from typing import List, Dict, Any, Optional
@@ -26,6 +26,7 @@ class MarketDataProvider:
         if not self.kraken_pairs_map:
             self._load_kraken_asset_pairs()
 
+        # Parametri indicatori
         self.ema_fast_span = 12
         self.ema_slow_span = 26
         self.rsi_period = 14
@@ -146,13 +147,73 @@ class MarketDataProvider:
         if unit == 'w': return datetime.timedelta(weeks=value)
         return None
 
+    # ==============================================================================
+    # FUNZIONE PER IL CALCOLO INDICATORI (Chiamata dentro getCandles)
+    # ==============================================================================
+    def _calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Calcola EMA, RSI e ATR aggiungendo le colonne al DataFrame.
+        """
+        if df.empty: return df
+
+        # Assicuriamoci che i dati siano ordinati per data
+        df = df.sort_index()
+
+        # 1. EMA (Exponential Moving Average)
+        df['EMA_Fast'] = df['Close'].ewm(span=self.ema_fast_span, adjust=False).mean()
+        df['EMA_Slow'] = df['Close'].ewm(span=self.ema_slow_span, adjust=False).mean()
+
+        # 2. RSI (Relative Strength Index)
+        delta = df['Close'].diff()
+
+        # Separa guadagni e perdite
+        gain = (delta.where(delta > 0, 0))
+        loss = (-delta.where(delta < 0, 0))
+
+        # Media Mobile Esponenziale (Standard per RSI)
+        avg_gain = gain.ewm(span=self.rsi_period, adjust=False).mean()
+        avg_loss = loss.ewm(span=self.rsi_period, adjust=False).mean()
+
+        # Calcolo RS e gestione divisione per zero
+        rs = avg_gain / avg_loss.replace(0, np.nan)
+        df['RSI'] = 100 - (100 / (1 + rs))
+
+        # Riempie i primi valori NaN (dove non c'è abbastanza storico) con 50 (neutro)
+        df['RSI'] = df['RSI'].fillna(50)
+
+        # 3. ATR (Average True Range)
+        prev_close = df['Close'].shift(1)
+        tr1 = df['High'] - df['Low']
+        tr2 = (df['High'] - prev_close).abs()
+        tr3 = (df['Low'] - prev_close).abs()
+
+        # True Range è il massimo tra le tre differenze
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+
+        # ATR è la media mobile (spesso smoothed) del TR
+        df['ATR'] = tr.ewm(span=self.atr_period, adjust=False).mean()
+        df['ATR'] = df['ATR'].fillna(0)
+
+        # Calcolo Spread (utile per info extra)
+        df['Spread'] = df['High'] - df['Low']
+
+        # Pulizia finale NaN
+        df.fillna(0, inplace=True)
+
+        return df
+
     def getCandles(self, pair: str, interval: str, range_period: str = "1mo", truncate_to: str = None) -> List[Dict[str, Any]]:
+        """
+        Recupera le candele (Yahoo o Kraken), calcola gli indicatori e restituisce una lista di dizionari.
+        """
+        # Se richiesto 'now', usa la funzione specifica (che ritorna RSI/ATR vuoti o approssimati)
         if interval.lower() == 'now':
             return self._fetch_kraken_now(pair)
 
         yf_ticker = self._get_yahoo_ticker(pair)
         data = pd.DataFrame()
 
+        # Tentativo 1: Yahoo Finance
         if yf_ticker:
             try:
                 yf_interval = self._normalize_interval_yahoo(interval)
@@ -167,6 +228,7 @@ class MarketDataProvider:
             except Exception:
                 pass
 
+        # Tentativo 2: Kraken History
         if data.empty:
             data = self._fetch_kraken_history(pair, interval)
 
@@ -174,12 +236,14 @@ class MarketDataProvider:
             print(f"[ERROR] Nessun dato trovato per {pair}")
             return []
 
+        # --- QUI CHIAMIAMO LA FUNZIONE PER POPOLARE RSI E ATR ---
         data = self._calculate_indicators(data)
-        data.reset_index(inplace=True)
 
+        data.reset_index(inplace=True)
         col_map = {'Date': 'timestamp', 'Datetime': 'timestamp', 'index': 'timestamp'}
         data.rename(columns=col_map, inplace=True)
 
+        # Troncamento temporale (opzionale)
         if truncate_to:
             delta = self._parse_timedelta(truncate_to)
             if delta:
@@ -196,8 +260,13 @@ class MarketDataProvider:
 
         final_list = []
         for row in result:
+            # Converte tutte le chiavi in minuscolo (RSI -> rsi, ATR -> atr)
             clean_row = {k.lower(): v for k, v in row.items()}
-            # Gestione fallback se mancano bid/ask
+
+            # Assegna esplicitamente il timeframe
+            clean_row['timeframe'] = interval
+
+            # Gestione fallback se mancano bid/ask/mid
             if 'bid' not in clean_row or clean_row['bid'] is None:
                 close_p = clean_row.get('close', 0)
                 high_p = clean_row.get('high', 0)
@@ -206,6 +275,11 @@ class MarketDataProvider:
                 clean_row['ask'] = close_p
                 clean_row['last'] = close_p
                 clean_row['mid'] = (high_p + low_p) / 2 if (high_p and low_p) else close_p
+
+            # Assicuriamoci che rsi e atr esistano nel dizionario finale (anche se 0)
+            if 'rsi' not in clean_row: clean_row['rsi'] = 50.0
+            if 'atr' not in clean_row: clean_row['atr'] = 0.0
+
             final_list.append(clean_row)
 
         return final_list
@@ -221,6 +295,10 @@ class MarketDataProvider:
             return df
 
     def _fetch_kraken_now(self, pair: str) -> List[Dict[str, Any]]:
+        """
+        Restituisce il prezzo attuale istantaneo.
+        Nota: RSI e ATR sono impostati a None perché richiedono storico.
+        """
         try:
             kraken_pair_id = self._get_kraken_id(pair)
             response = self.k.query_public('Ticker', {'pair': kraken_pair_id})
@@ -240,12 +318,25 @@ class MarketDataProvider:
             low_price = get_val('l', 0)
             volume = get_val('v', 0)
             mid_price = (ask_price + bid_price) / 2 if (ask_price and bid_price) else current_price
+
             return [{
-                'timestamp': datetime.datetime.now().isoformat(), 'pair': pair,
-                'open': open_price, 'high': high_price, 'low': low_price, 'close': current_price,
-                'volume': volume, 'spread': ask_price - bid_price, 'bid': bid_price, 'ask': ask_price,
-                'last': current_price, 'mid': mid_price, 'ema_fast': None, 'ema_slow': None,
-                'rsi': None, 'atr': None # Placeholder per realtime
+                'timestamp': datetime.datetime.now().isoformat(),
+                'pair': pair,
+                'open': open_price,
+                'high': high_price,
+                'low': low_price,
+                'close': current_price,
+                'volume': volume,
+                'spread': ask_price - bid_price,
+                'bid': bid_price,
+                'ask': ask_price,
+                'last': current_price,
+                'mid': mid_price,
+                'ema_fast': None,
+                'ema_slow': None,
+                'rsi': None,       # Non calcolabile su singolo tick
+                'atr': None,       # Non calcolabile su singolo tick
+                'timeframe': 'now'
             }]
         except Exception:
             return []
@@ -268,36 +359,6 @@ class MarketDataProvider:
             return df
         except Exception:
             return pd.DataFrame()
-
-    def _calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Calcola EMA, RSI e ATR."""
-        if df.empty: return df
-        
-        # 1. EMA
-        df['EMA_Fast'] = df['Close'].ewm(span=self.ema_fast_span, adjust=False).mean()
-        df['EMA_Slow'] = df['Close'].ewm(span=self.ema_slow_span, adjust=False).mean()
-        
-        # 2. RSI (Relative Strength Index)
-        delta = df['Close'].diff()
-        gain = (delta.where(delta > 0, 0)).ewm(span=self.rsi_period, adjust=False).mean()
-        loss = (-delta.where(delta < 0, 0)).ewm(span=self.rsi_period, adjust=False).mean()
-        rs = gain / loss.replace(0, np.nan)
-        df['RSI'] = 100 - (100 / (1 + rs))
-        df['RSI'] = df['RSI'].fillna(50) # Fallback iniziale
-
-        # 3. ATR (Average True Range)
-        # TR = Max(H-L, |H-Cp|, |L-Cp|)
-        prev_close = df['Close'].shift(1)
-        tr1 = df['High'] - df['Low']
-        tr2 = (df['High'] - prev_close).abs()
-        tr3 = (df['Low'] - prev_close).abs()
-        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-        df['ATR'] = tr.ewm(span=self.atr_period, adjust=False).mean()
-        df['ATR'] = df['ATR'].fillna(0)
-
-        df['Spread'] = df['High'] - df['Low']
-        df.fillna(0, inplace=True)
-        return df
 
     def _normalize_interval_yahoo(self, interval: str) -> Optional[str]:
         valid = ['1m', '2m', '5m', '15m', '30m', '60m', '90m', '1h', '1d', '5d', '1wk', '1mo', '3mo']
@@ -342,7 +403,6 @@ class MarketDataProvider:
         CYAN = '\033[96m'
         YELLOW = '\033[93m'
 
-        # Aggiunto RSI e ATR all'header
         header = f"{'TIMESTAMP':<20} {'OPEN':<9} {'HIGH':<9} {'LOW':<9} {'CLOSE':<9} {'RSI':<6} {'ATR':<8} {'VOLUME':<12}"
         print(f"\n{BOLD}{header}{RESET}")
         print("-" * 100)
@@ -354,11 +414,14 @@ class MarketDataProvider:
             rsi = c.get('rsi', 0)
             atr = c.get('atr', 0)
 
-            def fmt(v): return f"{v:.2f}" if v > 10 else f"{v:.4f}"
+            def fmt(v): return f"{v:.2f}" if v and v > 10 else (f"{v:.4f}" if v else "0.00")
             row_col = GREEN if cl >= o else RED
-            rsi_col = RED if rsi > 70 else (GREEN if rsi < 30 else RESET)
 
-            print(f"{ts:<20} {fmt(o):<9} {fmt(h):<9} {fmt(l):<9} {row_col}{fmt(cl):<9}{RESET} {rsi_col}{rsi:.1f}{RESET}   {fmt(atr):<8} {fmt(vol):<12}")
+            # Colora RSI
+            rsi_val = rsi if rsi else 50
+            rsi_col = RED if rsi_val > 70 else (GREEN if rsi_val < 30 else RESET)
+
+            print(f"{ts:<20} {fmt(o):<9} {fmt(h):<9} {fmt(l):<9} {row_col}{fmt(cl):<9}{RESET} {rsi_col}{rsi_val:.1f}{RESET}   {fmt(atr):<8} {fmt(vol):<12}")
         print("-" * 100 + "\n")
 
     def getAllPairs(self, quote_filter: str = "EUR", leverage_only: bool = False) -> List[Dict[str, Any]]:

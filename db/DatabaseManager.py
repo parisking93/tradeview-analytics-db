@@ -1,3 +1,5 @@
+# --- START OF FILE DatabaseManager.py ---
+
 import os
 import json
 import mysql.connector
@@ -83,76 +85,102 @@ class DatabaseManager:
             return None
 
     def insert_currency_data(self, candles_list, pair_info, table_name: str = "currency"):
-        if not candles_list:
-            return
+            if not candles_list:
+                return
 
-        safe_table = "".join(ch for ch in table_name if ch.isalnum() or ch == '_')
-        if not safe_table:
-            print(f"[ERROR] Nome tabella non valido: {table_name}")
-            return
+            safe_table = "".join(ch for ch in table_name if ch.isalnum() or ch == '_')
+            if not safe_table:
+                print(f"[ERROR] Nome tabella non valido: {table_name}")
+                return
 
-        pair_name = pair_info.get('pair')
-        pair_limits_id = self._get_pair_limit_id(pair_name)
+            # Recuperiamo i dati base
+            p_pair = pair_info.get('pair')
+            p_kr = pair_info.get('kr_pair')
+            p_base = pair_info.get('base')
+            p_quote = pair_info.get('quote')
 
-        if not pair_limits_id:
-            print(f"[ERROR] Coppia '{pair_name}' non trovata in pair_limits.")
-            return
+            # Controllo di sicurezza
+            if not p_pair:
+                print(f"[ERROR] Coppia senza nome trovata.")
+                return
 
-        query = f"""
-            INSERT IGNORE INTO {safe_table} (
-                pair_limits_id, pair, kr_pair, base, quote,
-                timestamp, open, high, low, close, volume,
-                bid, ask, mid, spread, ema_fast, ema_slow,
-                created_at
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
-        """
-        data_tuples = []
-        p_pair = pair_info.get('pair')
-        p_kr = pair_info.get('kr_pair')
-        p_base = pair_info.get('base')
-        p_quote = pair_info.get('quote')
+            # Query: 19 segnaposto (%s)
+            query = f"""
+                INSERT IGNORE INTO {safe_table} (
+                    pair, kr_pair, base, quote,
+                    timestamp, open, high, low, close, volume,
+                    bid, ask, mid, spread,
+                    ema_fast, ema_slow, rsi, atr, timeframe,
+                    created_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+            """
 
-        for c in candles_list:
-            row = (
-                pair_limits_id, p_pair, p_kr, p_base, p_quote,
-                c.get('timestamp'), c.get('open'), c.get('high'), c.get('low'), c.get('close'),
-                c.get('volume'), c.get('bid'), c.get('ask'), c.get('mid'), c.get('spread'),
-                c.get('ema_fast'), c.get('ema_slow')
-            )
-            data_tuples.append(row)
-        try:
-            self.cursor.executemany(query, data_tuples)
-            self.conn.commit()
-            print(f" -> Inserite/Aggiornate {self.cursor.rowcount} candele per {p_pair}")
-        except mysql.connector.Error as err:
-            print(f"Errore insert_currency_data: {err}")
-            self.conn.rollback()
+            data_tuples = []
+
+            for c in candles_list:
+                # Tupla: Deve avere esattamente 19 valori
+                row = (
+                    p_pair,         # 1. pair (che sostituisce il vecchio ID e il vecchio pair)
+                    p_kr,           # 2. kr_pair
+                    p_base,         # 3. base
+                    p_quote,        # 4. quote
+                    c.get('timestamp'),
+                    c.get('open'),
+                    c.get('high'),
+                    c.get('low'),
+                    c.get('close'),
+                    c.get('volume'),
+                    c.get('bid'),
+                    c.get('ask'),
+                    c.get('mid'),
+                    c.get('spread'),
+                    c.get('ema_fast'),
+                    c.get('ema_slow'),
+                    c.get('rsi'),
+                    c.get('atr'),
+                    c.get('timeframe')   # 19. timeframe
+                )
+                data_tuples.append(row)
+
+            try:
+                self.cursor.executemany(query, data_tuples)
+                self.conn.commit()
+                print(f" -> Inserite/Aggiornate {self.cursor.rowcount} candele per {p_pair}")
+            except mysql.connector.Error as err:
+                print(f"Errore insert_currency_data: {err}")
+                self.conn.rollback()
 
     # =====================================================
     # NUOVO METODO: INSERT ALL PAIRS (SETUP)
     # =====================================================
     def insert_all_pairs(self, all_pairs_list):
         """
-        Popola o AGGIORNA la tabella pair_limits.
-        Usa ON DUPLICATE KEY UPDATE per forzare il salvataggio dei dati.
+        Popola o aggiorna la tabella pair_limits usando tutti i campi restituiti da getAllPairs.
+        Usa ON DUPLICATE KEY UPDATE per aggiornare i record esistenti.
         """
         if not all_pairs_list:
             print(" -> Nessuna coppia da inserire.")
             return
 
-        # Query UPSERT (Insert o Update se esiste già)
         query = """
             INSERT INTO pair_limits (
-                pair, lot_decimals, ordermin, pair_decimals,
-                fee_volume_currency, leverage_buy, leverage_sell,
+                pair, kr_pair, base, quote,
+                lot_decimals, ordermin, pair_decimals,
+                fee_volume_currency, fees, fees_maker,
+                leverage_buy, leverage_sell,
                 leverage_buy_max, leverage_sell_max,
                 can_leverage_buy, can_leverage_sell
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON DUPLICATE KEY UPDATE
+                kr_pair = VALUES(kr_pair),
+                base = VALUES(base),
+                quote = VALUES(quote),
                 lot_decimals = VALUES(lot_decimals),
                 ordermin = VALUES(ordermin),
                 pair_decimals = VALUES(pair_decimals),
                 fee_volume_currency = VALUES(fee_volume_currency),
+                fees = VALUES(fees),
+                fees_maker = VALUES(fees_maker),
                 leverage_buy = VALUES(leverage_buy),
                 leverage_sell = VALUES(leverage_sell),
                 leverage_buy_max = VALUES(leverage_buy_max),
@@ -163,32 +191,30 @@ class DatabaseManager:
 
         data_tuples = []
         for p in all_pairs_list:
-            limits = p.get('pair_limits', {})
-
-            lev_buy_json = json.dumps(limits.get('leverage_buy', []))
-            lev_sell_json = json.dumps(limits.get('leverage_sell', []))
-
-            can_buy = 1 if limits.get('can_leverage_buy') else 0
-            can_sell = 1 if limits.get('can_leverage_sell') else 0
-
+            limits = p.get('pair_limits', {}) or {}
             row = (
                 p.get('pair'),
+                p.get('kr_pair'),
+                p.get('base'),
+                p.get('quote'),
                 limits.get('lot_decimals'),
                 limits.get('ordermin'),
                 limits.get('pair_decimals'),
                 limits.get('fee_volume_currency'),
-                lev_buy_json,
-                lev_sell_json,
+                json.dumps(limits.get('fees', [])),
+                json.dumps(limits.get('fees_maker', [])),
+                json.dumps(limits.get('leverage_buy', [])),
+                json.dumps(limits.get('leverage_sell', [])),
                 limits.get('leverage_buy_max'),
                 limits.get('leverage_sell_max'),
-                can_buy,
-                can_sell
+                1 if limits.get('can_leverage_buy') else 0,
+                1 if limits.get('can_leverage_sell') else 0
             )
             data_tuples.append(row)
 
         try:
             self.cursor.executemany(query, data_tuples)
-            self.conn.commit() # Importante: Conferma la transazione
+            self.conn.commit()
             print(f" -> Setup completato: Inserite/Aggiornate {len(data_tuples)} coppie in pair_limits.")
         except mysql.connector.Error as err:
             print(f"Errore insert_all_pairs: {err}")
@@ -198,3 +224,25 @@ class DatabaseManager:
         if self.cursor: self.cursor.close()
         if self.conn: self.conn.close()
         print("--- Connessione Database Chiusa ---")
+
+    def select_all(self, table_name: str, where_clause: str = "1"):
+        """
+        Esegue una SELECT * su una tabella a scelta usando una clausola WHERE testuale.
+        Restituisce una lista di dizionari {colonna: valore}.
+        """
+        safe_table = "".join(ch for ch in table_name if ch.isalnum() or ch == '_')
+        if not safe_table:
+            print(f"[ERROR] Nome tabella non valido: {table_name}")
+            return []
+
+        clause = where_clause.strip() if where_clause else "1"
+        query = f"SELECT * FROM {safe_table} WHERE {clause}"
+
+        try:
+            self.cursor.execute(query)
+            rows = self.cursor.fetchall()
+            columns = [col[0] for col in self.cursor.description] if self.cursor.description else []
+            return [dict(zip(columns, row)) for row in rows]
+        except mysql.connector.Error as err:
+            print(f"Errore select_all su {safe_table}: {err}")
+            return []
