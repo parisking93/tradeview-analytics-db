@@ -1,3 +1,4 @@
 pip install git+https://github.com/google-research/timesfm.git
 pip install torch numpy pandas scikit-learn einops huggingface_hub
 pip install git+https://github.com/amazon-science/chronos-forecasting.git
+servizi nella barra del menu ---> mySQL80---- > avvia

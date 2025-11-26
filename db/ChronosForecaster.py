@@ -230,7 +230,7 @@ if __name__ == "__main__":
     for i in range(50):
         price = price * (1 + np.random.normal(0, 0.002))
         fake_candles.append({
-            'timestamp': (ts + pd.Timedelta(minutes=15*i)).isoformat(),
+            'timestamp': (ts + pd.Timedelta(minutes=5*i)).isoformat(),
             'open': price, 'high': price*1.001, 'low': price*0.999, 'close': price,
             'volume': 1000.0, 'rsi': 50.0, 'atr': 100.0, 'spread': 10.0,
             'bid': price-5, 'ask': price+5, 'mid': price, 'last': price,
@@ -239,7 +239,7 @@ if __name__ == "__main__":
         })
 
     forecaster = ChronosForecaster()
-    res = forecaster.predict_candles(fake_candles, "15m", 5)
+    res = forecaster.predict_candles(fake_candles, "5m", 20)
 
     print(f"Output Structure Keys: {res[0].keys()}")
     for r in res:
