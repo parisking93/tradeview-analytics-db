@@ -82,8 +82,15 @@ class DatabaseManager:
             self.conn.rollback()
             return None
 
-    def insert_currency_data(self, candles_list, pair_info):
-        if not candles_list: return
+    def insert_currency_data(self, candles_list, pair_info, table_name: str = "currency"):
+        if not candles_list:
+            return
+
+        safe_table = "".join(ch for ch in table_name if ch.isalnum() or ch == '_')
+        if not safe_table:
+            print(f"[ERROR] Nome tabella non valido: {table_name}")
+            return
+
         pair_name = pair_info.get('pair')
         pair_limits_id = self._get_pair_limit_id(pair_name)
 
@@ -91,8 +98,8 @@ class DatabaseManager:
             print(f"[ERROR] Coppia '{pair_name}' non trovata in pair_limits.")
             return
 
-        query = """
-            INSERT IGNORE INTO currency (
+        query = f"""
+            INSERT IGNORE INTO {safe_table} (
                 pair_limits_id, pair, kr_pair, base, quote,
                 timestamp, open, high, low, close, volume,
                 bid, ask, mid, spread, ema_fast, ema_slow,

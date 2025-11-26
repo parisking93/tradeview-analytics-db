@@ -1,9 +1,8 @@
 import React, { useEffect, useRef } from 'react';
 import { 
-  createChart, 
-  ColorType, 
-  IChartApi, 
-  ISeriesApi, 
+  createChart,
+  ColorType,
+  IChartApi,
   SeriesMarker, 
   Time, 
   CandlestickSeries,
@@ -125,8 +124,9 @@ const ChartComponent: React.FC<ChartComponentProps> = ({ data, trades, pivots, s
     });
 
     // Safety check: ensure series exists and setMarkers is a function before calling
-    if (candlestickSeries && typeof candlestickSeries.setMarkers === 'function') {
-        candlestickSeries.setMarkers(markers);
+    const seriesWithMarkers = candlestickSeries as unknown as { setMarkers?: (m: SeriesMarker<Time>[]) => void };
+    if (seriesWithMarkers && typeof seriesWithMarkers.setMarkers === 'function') {
+        seriesWithMarkers.setMarkers(markers);
     }
 
     // Fit content nicely

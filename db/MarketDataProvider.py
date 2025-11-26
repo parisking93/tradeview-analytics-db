@@ -1,4 +1,4 @@
---- START OF FILE MarketDataProvider.py ---
+# --- START OF FILE MarketDataProvider.py ---
 
 import os
 import time
