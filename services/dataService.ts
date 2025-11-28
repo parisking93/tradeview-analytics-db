@@ -1,6 +1,6 @@
 // --- START OF FILE dataService.ts ---
 
-import { Candle, DataResponse, PivotLevel, PivotType, Trade, TradeType } from '../types';
+import { Candle, DataResponse, ForecastData, PivotLevel, PivotType, Trade, TradeType } from '../types';
 
 const API_BASE = '/api';
 
@@ -119,6 +119,7 @@ export const fetchData = async (
 
   const marketPayload = await marketResponse.json();
   const candleSource = Array.isArray(marketPayload) ? marketPayload : marketPayload.candles || [];
+  const forecastSource = !Array.isArray(marketPayload) && marketPayload.forecast ? marketPayload.forecast : [];
 
   const mappedCandles: Candle[] = candleSource
     .map((row: any) => {
@@ -147,6 +148,29 @@ export const fetchData = async (
   }
   const candles = dedupCandles;
 
+  const mappedForecast: ForecastData[] = (forecastSource as any[])
+    .map((row: any) => ({
+      time: row.time || row.timestamp || row.dt || row.ts,
+      open: Number(row.open),
+      high: Number(row.high),
+      low: Number(row.low),
+      close: Number(row.close),
+    }))
+    .filter((c: ForecastData) => {
+      const ts = toUnix(c.time);
+      return c.time !== undefined && ts !== undefined && !Number.isNaN(Number(c.close));
+    });
+
+  const sortedForecast = mappedForecast.sort((a, b) => Number(toUnix(a.time) || 0) - Number(toUnix(b.time) || 0));
+  const dedupForecast: ForecastData[] = [];
+  const seenForecastTimes = new Set<number>();
+  for (const c of sortedForecast) {
+    const t = Number(toUnix(c.time) || 0);
+    if (seenForecastTimes.has(t)) continue;
+    seenForecastTimes.add(t);
+    dedupForecast.push(c);
+  }
+
   const indicatorSource = !Array.isArray(marketPayload) && marketPayload.indicators ? marketPayload.indicators : {};
   const indicators = {
     ema_fast: (indicatorSource.ema_fast || []).map((item: any) => ({
@@ -169,7 +193,7 @@ export const fetchData = async (
   const tradesPayload = portfolioResponse.ok ? await portfolioResponse.json() : [];
   const trades: Trade[] = Array.isArray(tradesPayload) ? tradesPayload.map(normalizeTrade) : [];
 
-  return { candles, trades, pivots, indicators };
+  return { candles, forecast: dedupForecast, trades, pivots, indicators };
 };
 
 export const fetchPortfolio = async (): Promise<Trade[]> => {

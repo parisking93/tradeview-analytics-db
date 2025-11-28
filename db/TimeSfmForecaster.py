@@ -64,9 +64,11 @@ class TimeSfmForecaster:
             print(f"\n[TimeSfm] CRITICAL ERROR during init: {e}")
             raise e
 
-    def predict_candles(self, candles: List[Dict[str, Any]], timeframe: str, horizon: int) -> List[Dict[str, Any]]:
+    def predict_candles(self, candles: List[Dict[str, Any]], timeframe: str, horizon: int, pair) -> List[Dict[str, Any]]:
         if not candles or len(candles) < 30:
             return []
+
+        eps = 1e-9
 
         # 1. Preparazione Dati
         df = pd.DataFrame(candles)
@@ -80,6 +82,13 @@ class TimeSfmForecaster:
             if c in df.columns:
                 df[c] = df[c].astype(float).ffill().fillna(0)
 
+        def _safe_array(series):
+            arr = pd.to_numeric(series, errors='coerce').to_numpy(dtype=float)
+            # replace inf/-inf with nan then ffill/bfill and fallback to 0
+            arr[~np.isfinite(arr)] = np.nan
+            arr = pd.Series(arr).ffill().bfill().fillna(0).to_numpy()
+            return arr
+
         # Ultimo stato
         last_row = df.iloc[-1]
         last_ts = last_row['timestamp']
@@ -88,15 +97,21 @@ class TimeSfmForecaster:
 
         # --- FEATURE ENGINEERING ---
         def get_log_ret(series):
-            vals = series.values
+            vals = _safe_array(series)
+            if len(vals) < 2:
+                return np.zeros(1, dtype=float)
+            # Clamp to avoid divide-by-zero / negatives
+            vals = np.clip(vals, eps, None)
             return np.log(vals[1:] / vals[:-1])
 
         close_log = get_log_ret(df['close'])
         high_log = get_log_ret(df['high'])
         low_log = get_log_ret(df['low'])
-        vol_log = np.log1p(df['volume'].values[1:])
-        rsi_vals = df['rsi'].values[1:]
-        atr_vals = df['atr'].values[1:]
+        vol_arr = _safe_array(df['volume'])
+        vol_arr = np.clip(vol_arr, eps, None)
+        vol_log = np.log1p(vol_arr[1:]) if len(vol_arr) > 1 else np.zeros(1, dtype=float)
+        rsi_vals = _safe_array(df['rsi'])[1:]
+        atr_vals = _safe_array(df['atr'])[1:]
 
         # --- SCALING ---
         scalers = [StandardScaler() for _ in range(6)]
@@ -104,7 +119,13 @@ class TimeSfmForecaster:
 
         prepared_inputs = []
         for i, arr in enumerate(inputs_list):
-            scaled = scalers[i].fit_transform(arr.reshape(-1, 1)).flatten()
+            arr = np.asarray(arr, dtype=float)
+            arr[~np.isfinite(arr)] = 0.0
+            # Se tutti zero, StandardScaler darebbe nan; gestiamo il caso
+            if np.all(arr == arr[0]):
+                scaled = np.zeros_like(arr, dtype=float)
+            else:
+                scaled = scalers[i].fit_transform(arr.reshape(-1, 1)).flatten()
             if len(scaled) > self.context_len:
                 scaled = scaled[-self.context_len:]
             prepared_inputs.append(scaled)
@@ -206,9 +227,11 @@ class TimeSfmForecaster:
             bid = next_close - (last_spread/2)
             ask = next_close + (last_spread/2)
 
+            ts_str = current_ts.strftime('%Y-%m-%d %H:%M:%S') if hasattr(current_ts, 'strftime') else str(current_ts)
+
             candle = {
-                'timestamp': current_ts.isoformat(),
-                'pair': candles[0].get('pair', 'N/A'),
+                'timestamp': ts_str,
+                'pair': pair['pair'],
                 'open': last_row['close'],
                 'high': final_high,
                 'low': final_low,
@@ -223,7 +246,7 @@ class TimeSfmForecaster:
                 'atr': val_atr,
                 'ema_fast': 0, 'ema_slow': 0,
                 'type': 'forecast',
-                'timeframe': timeframe + '+' + str(i+1)
+                'timeframe': timeframe + '+' + str(i+1)  # manteniamo stesso formato di data_1d
             }
             future_candles.append(candle)
             last_row = pd.Series(candle)
@@ -239,6 +262,20 @@ class TimeSfmForecaster:
         for i, c in enumerate(future_candles):
             c['ema_fast'] = float(res_emas.iloc[i]['f'])
             c['ema_slow'] = float(res_emas.iloc[i]['s'])
+
+        # Normalizza tipi per evitare np.float* nei salvataggi/DB
+        def _to_float(val):
+            try:
+                return float(val)
+            except Exception:
+                return None
+
+        for c in future_candles:
+            c['timestamp'] = str(c.get('timestamp'))
+            for key in ['open', 'high', 'low', 'close', 'volume', 'bid', 'ask', 'mid', 'spread',
+                        'rsi', 'atr', 'ema_fast', 'ema_slow', 'last']:
+                if key in c:
+                    c[key] = _to_float(c.get(key))
 
         return future_candles
 

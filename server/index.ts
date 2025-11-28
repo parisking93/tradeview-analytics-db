@@ -20,6 +20,11 @@ const normalizeTimeframe = (tf?: string) => {
   return map[t] || t;
 };
 
+const forecastTimeframe = (tf?: string) => {
+  const base = normalizeTimeframe(tf);
+  return base.includes('+1') ? base : `${base}+1`;
+};
+
 const compactSymbol = (value: string) =>
   value.replace(/[^A-Za-z0-9]/g, "").toUpperCase();
 
@@ -91,6 +96,7 @@ app.get("/api/market/:symbol", async (req, res) => {
   try {
     const resolved = await resolvePairFromLimits(symbol);
     const targetTimeframe = req.query.timeframe ? timeframe : timeframe;
+    const targetForecastTimeframe = forecastTimeframe(targetTimeframe);
 
     // Query Base
     let querySQL = `
@@ -116,8 +122,29 @@ app.get("/api/market/:symbol", async (req, res) => {
 
     const [rows] = await pool.query(querySQL, queryParams);
 
-    if (!(rows as any[]).length) {
-      return res.json({ symbol: resolved.pair || symbol, timeframe: targetTimeframe, candles: [], indicators: {}, lastPrice: 0, count: 0 });
+    // --- Forecast query (timeframe +1) ---
+    let forecastSQL = `
+      SELECT
+          pair, kr_pair, base, quote, timestamp, open, high, low, close, volume,
+          ema_fast, ema_slow, rsi, atr, bid, ask, mid, spread, timeframe
+       FROM forecast
+       WHERE (pair = ? OR kr_pair = ? OR REPLACE(pair, '/', '') = ? OR pair LIKE ?)
+         AND timeframe = ?
+    `;
+    const forecastParams: any[] = [resolved.pair, resolved.kr_pair, compact, `%${symbol}%`, targetForecastTimeframe];
+
+    if (toDate) {
+      forecastSQL += ` AND STR_TO_DATE(timestamp, '%Y-%m-%d %H:%i:%s') < STR_TO_DATE(?, '%Y-%m-%d %H:%i:%s') `;
+      forecastParams.push(toDate);
+    }
+
+    forecastSQL += ` ORDER BY STR_TO_DATE(timestamp, '%Y-%m-%d %H:%i:%s') DESC LIMIT ?`;
+    forecastParams.push(limit);
+
+    const [forecastRows] = await pool.query(forecastSQL, forecastParams);
+
+    if (!(rows as any[]).length && !(forecastRows as any[]).length) {
+      return res.json({ symbol: resolved.pair || symbol, timeframe: targetTimeframe, candles: [], forecast: [], indicators: {}, lastPrice: 0, count: 0 });
     }
 
     const rowsAsList = (rows as any[]).map((row) => ({
@@ -132,9 +159,19 @@ app.get("/api/market/:symbol", async (req, res) => {
       ema_slow: row.ema_slow ? Number(row.ema_slow) : undefined,
     }));
 
+    const forecastRowsAsList = (forecastRows as any[]).map((row) => ({
+      pair: row.pair,
+      timestamp: row.timestamp || row.dt || row.ts,
+      open: Number(row.open),
+      high: Number(row.high),
+      low: Number(row.low),
+      close: Number(row.close),
+    }));
+
     // Invertiamo l'array (dal DB arriva: Oggi, Ieri, L'altro ieri...)
     // Il frontend vuole: (L'altro ieri, Ieri, Oggi...)
     const ordered = rowsAsList.reverse();
+    const forecastOrdered = forecastRowsAsList.reverse();
 
     const candles = ordered.map((row) => ({
       time: row.timestamp,
@@ -149,10 +186,19 @@ app.get("/api/market/:symbol", async (req, res) => {
       ema_slow: ordered.filter(r => r.ema_slow).map(r => ({ time: r.timestamp, value: r.ema_slow }))
     };
 
+    const forecastCandles = forecastOrdered.map((row) => ({
+      time: row.timestamp,
+      open: row.open,
+      high: row.high,
+      low: row.low,
+      close: row.close,
+    }));
+
     return res.json({
       symbol: resolved.pair || symbol,
       timeframe: targetTimeframe,
       candles,
+      forecast: forecastCandles,
       indicators,
       lastPrice: candles.length ? candles[candles.length - 1].close : 0,
       count: candles.length,

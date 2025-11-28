@@ -1,6 +1,6 @@
 
 import React, { useEffect, useState } from 'react';
-import { Trade, Candle, ForecastData } from '../types';
+import { Trade, Candle } from '../types';
 import { fetchData, fetchPortfolio } from '../services/dataService';
 import ForecastChart from './ForecastChart';
 import TimeframeSelector from './TimeframeSelector';
@@ -10,7 +10,7 @@ const ForecastDashboard: React.FC = () => {
     const [portfolioTrades, setPortfolioTrades] = useState<Trade[]>([]);
     const [selectedTrade, setSelectedTrade] = useState<Trade | null>(null);
     const [timeframe, setTimeframe] = useState('1h'); // Default better for forecast
-    const [chartData, setChartData] = useState<{ candles: Candle[], forecast: ForecastData[] }>({ candles: [], forecast: [] });
+    const [chartData, setChartData] = useState<{ candles: Candle[], forecast: Candle[] }>({ candles: [], forecast: [] });
     const [loading, setLoading] = useState(true);
     const [loadingChart, setLoadingChart] = useState(false);
 
@@ -61,10 +61,10 @@ const ForecastDashboard: React.FC = () => {
     }
 
     return (
-        <div className="flex h-full bg-gray-950">
+        <div className="flex h-full bg-gray-950 min-w-0 flex-1 w-full">
             
             {/* Main Forecast Chart Area */}
-            <div className="flex-1 flex flex-col border-r border-gray-800 relative">
+            <div className="flex-1 min-w-0 flex flex-col border-r border-gray-800 relative">
                 
                 {/* Forecast Toolbar */}
                 <div className="h-10 border-b border-gray-800 bg-gray-900/50 flex items-center px-4 justify-between">
@@ -74,7 +74,7 @@ const ForecastDashboard: React.FC = () => {
                      </div>
                 </div>
 
-                <div className="flex-1 w-full relative">
+                <div className="flex-1 w-full relative min-w-0">
                     {selectedTrade ? (
                         loadingChart ? (
                             <div className="absolute inset-0 flex items-center justify-center bg-gray-950/50 backdrop-blur-sm z-20">

@@ -41,6 +41,8 @@ export interface PivotLevel {
   color?: string;
 }
 
+export interface ForecastData extends Candle {}
+
 // --- DATABASE SCHEMA MAPPING ---
 
 // Exact mapping of the 'currency' table from DBeaver
@@ -92,5 +94,6 @@ export interface DataResponse {
   indicators?: {
     ema_fast: { time: string, value: number }[];
     ema_slow: { time: string, value: number }[];
-  }
+  },
+  forecast?: ForecastData[];
 }

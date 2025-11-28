@@ -1,24 +1,35 @@
 
 import React, { useEffect, useRef } from 'react';
-import { 
+import {
   createChart, 
   ColorType, 
   IChartApi, 
   Time, 
   CandlestickSeries,
-  LineStyle,
-  LineSeries
+  LineStyle
 } from 'lightweight-charts';
-import { Candle, Trade, ForecastData } from '../types';
+import { Candle, Trade } from '../types';
 import { CHART_BG_COLOR, CHART_GRID_COLOR, CHART_TEXT_COLOR } from '../constants';
 
 interface ForecastChartProps {
   candles: Candle[];
-  forecast: ForecastData[];
+  forecast: Candle[];
   activeTrade?: Trade; 
   symbol: string;
   timeframe?: string;
 }
+
+const toUnix = (value: any) => {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value === 'number') {
+    return value > 1e12 ? Math.floor(value / 1000) : value;
+  }
+  const stringVal = String(value).replace(' ', 'T');
+  const finalString = stringVal.includes('Z') ? stringVal : stringVal + 'Z';
+  const date = new Date(finalString);
+  if (Number.isNaN(date.getTime())) return undefined;
+  return Math.floor(date.getTime() / 1000);
+};
 
 const ForecastChart: React.FC<ForecastChartProps> = ({ candles, forecast, activeTrade, symbol, timeframe = '1D' }) => {
   const chartContainerRef = useRef<HTMLDivElement>(null);
@@ -57,48 +68,46 @@ const ForecastChart: React.FC<ForecastChartProps> = ({ candles, forecast, active
       wickUpColor: '#60a5fa',
       wickDownColor: '#1e3a8a',
     });
+
+    const forecastSeries = chart.addSeries(CandlestickSeries, {
+      upColor: '#fbbf24', // giallo
+      downColor: '#a855f7', // viola
+      borderVisible: false,
+      wickUpColor: '#fbbf24',
+      wickDownColor: '#a855f7',
+    });
     
     // Map data to Unix Timestamps
-    const candleData = candles.map(d => ({
-        time: (new Date(d.time).getTime() / 1000) as Time,
-        open: d.open,
-        high: d.high,
-        low: d.low,
-        close: d.close
-    }));
+    const candleData = candles
+      .map(d => {
+        const t = toUnix(d.time);
+        if (t === undefined) return null;
+        return {
+          time: t as Time,
+          open: d.open,
+          high: d.high,
+          low: d.low,
+          close: d.close
+        };
+      })
+      .filter(Boolean) as any[];
     candleSeries.setData(candleData);
 
-    const p90Series = chart.addSeries(LineSeries, {
-        color: 'rgba(239, 68, 68, 0.5)',
-        lineWidth: 2,
-        lineStyle: LineStyle.Solid,
-        title: 'P90 (High)'
-    });
-    
-    const p50Series = chart.addSeries(LineSeries, {
-        color: '#fbbf24',
-        lineWidth: 3,
-        lineStyle: LineStyle.Dashed,
-        title: 'P50 (Median)'
-    });
-
-    const p10Series = chart.addSeries(LineSeries, {
-        color: 'rgba(239, 68, 68, 0.5)', 
-        lineWidth: 2,
-        lineStyle: LineStyle.Solid,
-        title: 'P10 (Low)'
-    });
-
     if (forecast.length > 0) {
-        // Map forecast time to unix
-        const mapForecast = (f: ForecastData, val: number) => ({
-            time: (new Date(f.time).getTime() / 1000) as Time,
-            value: val
-        });
-
-        p90Series.setData(forecast.map(f => mapForecast(f, f.p90)));
-        p50Series.setData(forecast.map(f => mapForecast(f, f.p50)));
-        p10Series.setData(forecast.map(f => mapForecast(f, f.p10)));
+      const forecastData = forecast
+        .map(f => {
+          const t = toUnix(f.time);
+          if (t === undefined) return null;
+          return {
+            time: t as Time,
+            open: f.open,
+            high: f.high,
+            low: f.low,
+            close: f.close
+          };
+        })
+        .filter(Boolean) as any[];
+      forecastSeries.setData(forecastData);
     }
 
     if (activeTrade) {
@@ -130,19 +139,27 @@ const ForecastChart: React.FC<ForecastChartProps> = ({ candles, forecast, active
 
     chart.timeScale().fitContent();
 
-    const handleResize = () => {
+    const applySize = () => {
       if (chartContainerRef.current && chartRef.current) {
+        const { clientWidth, clientHeight } = chartContainerRef.current;
         chartRef.current.applyOptions({ 
-            width: chartContainerRef.current.clientWidth,
-            height: chartContainerRef.current.clientHeight 
+            width: clientWidth,
+            height: clientHeight 
         });
       }
     };
 
+    applySize();
+
+    const handleResize = () => applySize();
     window.addEventListener('resize', handleResize);
+
+    const resizeObserver = new ResizeObserver(() => applySize());
+    resizeObserver.observe(chartContainerRef.current);
 
     return () => {
       window.removeEventListener('resize', handleResize);
+      resizeObserver.disconnect();
       chart.remove();
       chartRef.current = null;
     };
@@ -154,18 +171,17 @@ const ForecastChart: React.FC<ForecastChartProps> = ({ candles, forecast, active
         
         <div className="absolute top-4 left-4 z-10 bg-gray-900/90 backdrop-blur p-4 rounded-lg border border-gray-700 shadow-xl pointer-events-none">
             <h2 className="text-xl font-bold text-white mb-1">{symbol} <span className="text-blue-400 text-sm font-normal">AI Forecast</span></h2>
-            <p className="text-xs text-gray-400 mb-2">{timeframe} Timeframe</p>
+            <p className="text-xs text-gray-400 mb-2">{timeframe} Timeframe (forecast overlay {timeframe}+1)</p>
             <div className="flex flex-col gap-2 mt-2 text-xs font-mono">
-                <div className="flex items-center gap-2">
-                    <div className="w-4 h-0.5 bg-amber-400 border-b-2 border-dashed border-amber-400"></div>
-                    <span className="text-gray-300">P50 (Median)</span>
-                </div>
-                <div className="flex items-center gap-2">
-                    <div className="w-4 h-4 bg-red-500/20 border border-red-500/50 rounded flex items-center justify-center">
-                         <div className="w-full h-0.5 bg-red-500/50"></div>
-                    </div>
-                    <span className="text-gray-300">P10 - P90 Range</span>
-                </div>
+              <div className="flex items-center gap-2">
+                  <div className="w-4 h-0.5 bg-blue-300"></div>
+                  <span className="text-gray-300">Market candles</span>
+              </div>
+              <div className="flex items-center gap-2">
+                  <div className="w-4 h-0.5 bg-amber-300"></div>
+                  <div className="w-4 h-0.5 bg-purple-400"></div>
+                  <span className="text-gray-300">Forecast candles ({timeframe}+1)</span>
+              </div>
             </div>
         </div>
     </div>

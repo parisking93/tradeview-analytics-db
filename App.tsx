@@ -216,32 +216,36 @@ const App: React.FC = () => {
       </header>
       <div className="flex flex-1 overflow-hidden min-w-0">
         {viewMode === 'FORECAST' ? (
-          <ForecastDashboard />
+          <div className="flex-1 min-w-0 flex overflow-hidden">
+            <ForecastDashboard />
+          </div>
         ) : (
-          <main className="flex-1 min-w-0 relative flex flex-col overflow-hidden">
-            {initialLoading ? (
-              <div className="flex-1 flex items-center justify-center flex-col gap-4">
-                <Loader2 className="w-10 h-10 text-blue-500 animate-spin" />
-                <p className="text-gray-500">Loading {symbol}...</p>
-              </div>
-            ) : (
-              <div className="w-full h-full relative">
-                <ChartComponent
-                  data={candles}
-                  trades={trades}
-                  pivots={pivots}
-                  symbol={symbol}
-                  timeframe={timeframe}
-                  onRequestMore={handleLoadMore} // Passiamo la funzione
-                  isLoadingMore={loadingMore}    // Passiamo lo stato
-                />
-              </div>
-            )}
-          </main>
+          <>
+            <main className="flex-1 min-w-0 relative flex flex-col overflow-hidden">
+              {initialLoading ? (
+                <div className="flex-1 flex items-center justify-center flex-col gap-4">
+                  <Loader2 className="w-10 h-10 text-blue-500 animate-spin" />
+                  <p className="text-gray-500">Loading {symbol}...</p>
+                </div>
+              ) : (
+                <div className="w-full h-full relative">
+                  <ChartComponent
+                    data={candles}
+                    trades={trades}
+                    pivots={pivots}
+                    symbol={symbol}
+                    timeframe={timeframe}
+                    onRequestMore={handleLoadMore} // Passiamo la funzione
+                    isLoadingMore={loadingMore}    // Passiamo lo stato
+                  />
+                </div>
+              )}
+            </main>
+            <aside className="hidden md:block w-80 h-full border-l border-gray-800">
+              <Sidebar trades={trades} onSelectTrade={handleSelectSymbol} />
+            </aside>
+          </>
         )}
-        <aside className="hidden md:block w-80 h-full border-l border-gray-800">
-          <Sidebar trades={trades} onSelectTrade={handleSelectSymbol} />
-        </aside>
       </div>
     </div>
   );

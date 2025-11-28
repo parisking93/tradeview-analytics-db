@@ -1,7 +1,7 @@
 from db.KrakenManager import KrakenPortfolioManager
 from db.DatabaseManager import DatabaseManager
 from db.MarketDataProvider import MarketDataProvider # Assicurati del percorso import corretto
-
+from db.TimeSfmForecaster import TimeSfmForecaster
 def main():
     print("=== AVVIO BOT ===")
 
@@ -81,7 +81,20 @@ def main3():
     db.close_connection()
     print("\n=== FINE ===")
 
+def main4():
+    market_prov = MarketDataProvider()
+    forecast = TimeSfmForecaster()
+    db = DatabaseManager()
+    all_pairs_eur = market_prov.getAllPairs(quote_filter="EUR", leverage_only=True)
+
+    for p in all_pairs_eur:
+        data_1d = market_prov.getCandles(p['pair'], "1d", "5y")
+        res = forecast.predict_candles(data_1d, "1d", 5, p)
+        db.insert_currency_data(res, p,"forecast")
+    # Esegui job ogni ora
+
 if __name__ == "__main__":
     # main2()
     # main3()
-    main()
+    # main()
+    main4()
