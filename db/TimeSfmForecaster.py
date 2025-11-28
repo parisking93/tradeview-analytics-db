@@ -222,7 +222,8 @@ class TimeSfmForecaster:
                 'rsi': val_rsi,
                 'atr': val_atr,
                 'ema_fast': 0, 'ema_slow': 0,
-                'type': 'forecast'
+                'type': 'forecast',
+                'timeframe': timeframe + '+' + str(i+1)
             }
             future_candles.append(candle)
             last_row = pd.Series(candle)

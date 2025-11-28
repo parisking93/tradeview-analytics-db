@@ -1,27 +1,59 @@
-import { Candle, Trade, PivotLevel, PivotType, DataResponse, TradeType } from '../types';
+// --- START OF FILE dataService.ts ---
+
+import { Candle, DataResponse, PivotLevel, PivotType, Trade, TradeType } from '../types';
 
 const API_BASE = '/api';
+
+// FIX: Funzione toUnix più robusta per date SQL 'YYYY-MM-DD HH:MM:SS'
 const toUnix = (value: any): number | undefined => {
   if (value === undefined || value === null) return undefined;
-  if (typeof value === 'number') return value > 1e12 ? Math.floor(value / 1000) : value;
-  const date = new Date(value);
+  if (typeof value === 'number') {
+    // Se è già un timestamp in millisecondi (es. 1700000000000), convertilo in secondi
+    return value > 1e12 ? Math.floor(value / 1000) : value;
+  }
+
+  // Se è stringa, assicuriamoci che sia ISO-8601 compatibile (spazio -> T)
+  const stringVal = String(value).replace(' ', 'T');
+  // Aggiungiamo 'Z' se manca per forzare UTC, altrimenti il browser usa il fuso locale
+  const finalString = stringVal.includes('Z') ? stringVal : stringVal + 'Z';
+
+  const date = new Date(finalString);
   if (Number.isNaN(date.getTime())) return undefined;
   return Math.floor(date.getTime() / 1000);
 };
 
 const generatePivots = (
-  currentPrice: number,
-  symbol: string,
-  spreadHint?: number,
-  atrHint?: number
+  candles: Candle[],
+  symbol: string
 ): PivotLevel[] => {
-  const stepCandidate = atrHint && atrHint > 0 ? atrHint : spreadHint && spreadHint > 0 ? spreadHint : currentPrice * 0.01;
-  const step = stepCandidate > 0 ? stepCandidate : 1;
+  if (!candles || candles.length < 3) {
+    return [
+      { id: 1, symbol, price: 0, type: PivotType.RESISTANCE, label: 'R1', color: '#ff7f50' },
+      { id: 2, symbol, price: 0, type: PivotType.RESISTANCE, label: 'R2', color: '#ff8fb1' },
+      { id: 3, symbol, price: 0, type: PivotType.SUPPORT, label: 'S1', color: '#3dd5f3' },
+      { id: 4, symbol, price: 0, type: PivotType.SUPPORT, label: 'S2', color: '#5eead4' },
+    ];
+  }
+
+  const recent = candles.slice(-50);
+  const highs = recent.map(c => c.high);
+  const lows = recent.map(c => c.low);
+  const closes = recent.map(c => c.close);
+  const H = Math.max(...highs);
+  const L = Math.min(...lows);
+  const C = closes[closes.length - 1];
+  const pivot = (H + L + C) / 3;
+  const range = H - L;
+  const R1 = 2 * pivot - L;
+  const S1 = 2 * pivot - H;
+  const R2 = pivot + range;
+  const S2 = pivot - range;
+
   return [
-    { id: 1, symbol, price: currentPrice + step, type: PivotType.RESISTANCE, label: 'R1', color: '#ef5350' },
-    { id: 2, symbol, price: currentPrice + step * 2, type: PivotType.RESISTANCE, label: 'R2', color: '#c62828' },
-    { id: 3, symbol, price: currentPrice - step, type: PivotType.SUPPORT, label: 'S1', color: '#26a69a' },
-    { id: 4, symbol, price: currentPrice - step * 2, type: PivotType.SUPPORT, label: 'S2', color: '#00695c' },
+    { id: 1, symbol, price: R1, type: PivotType.RESISTANCE, label: 'R1', color: '#ff7f50' },
+    { id: 2, symbol, price: R2, type: PivotType.RESISTANCE, label: 'R2', color: '#ff8fb1' },
+    { id: 3, symbol, price: S1, type: PivotType.SUPPORT, label: 'S1', color: '#3dd5f3' },
+    { id: 4, symbol, price: S2, type: PivotType.SUPPORT, label: 'S2', color: '#5eead4' },
   ];
 };
 
@@ -61,10 +93,25 @@ export const searchPairs = async (query: string): Promise<string[]> => {
   return await response.json();
 };
 
-export const fetchData = async (symbol: string): Promise<DataResponse> => {
-  const timeframe = '4h';
+const tfToApi = (tf?: string) => (tf ? tf.toLowerCase() : '4h');
+
+export const fetchData = async (
+  symbol: string,
+  timeframe: string = '4h',
+  endDate?: string,
+  limit: number = 800
+): Promise<DataResponse> => {
+
+  const apiTimeframe = tfToApi(timeframe);
+  const safeLimit = Math.min(limit, 12000);
+
+  let marketUrl = `${API_BASE}/market/${encodeURIComponent(symbol)}?timeframe=${apiTimeframe}&limit=${safeLimit}`;
+  if (endDate) {
+    marketUrl += `&to=${encodeURIComponent(endDate)}`;
+  }
+
   const [marketResponse, portfolioResponse] = await Promise.all([
-    fetch(`${API_BASE}/market/${encodeURIComponent(symbol)}?timeframe=${timeframe}&limit=800`),
+    fetch(marketUrl),
     fetch(`${API_BASE}/portfolio`),
   ]);
 
@@ -73,43 +120,51 @@ export const fetchData = async (symbol: string): Promise<DataResponse> => {
   const marketPayload = await marketResponse.json();
   const candleSource = Array.isArray(marketPayload) ? marketPayload : marketPayload.candles || [];
 
-  const candles: Candle[] = candleSource
-    .map((row: any) => ({
-      time: toUnix(row.time || row.timestamp || row.dt || row.ts) ?? row.time ?? row.timestamp ?? row.dt ?? row.ts,
-      open: Number(row.open),
-      high: Number(row.high),
-      low: Number(row.low),
-      close: Number(row.close),
-    }))
-    .filter((c: Candle) => !Number.isNaN(c.close));
+  const mappedCandles: Candle[] = candleSource
+    .map((row: any) => {
+      // Usiamo il toUnix migliorato
+      const t = toUnix(row.time || row.timestamp || row.dt || row.ts);
+      return {
+        time: t as any,
+        open: Number(row.open),
+        high: Number(row.high),
+        low: Number(row.low),
+        close: Number(row.close),
+      };
+    })
+    // Filtriamo rigorosamente i NaN o undefined
+    .filter((c: Candle) => c.time !== undefined && !Number.isNaN(Number(c.time)) && !Number.isNaN(c.close));
+
+  // Ordinamento e Deduplicazione essenziale per evitare crash del grafico
+  const sortedCandles = mappedCandles.sort((a, b) => Number(a.time) - Number(b.time));
+  const dedupCandles: Candle[] = [];
+  const seenTimes = new Set<number>();
+  for (const c of sortedCandles) {
+    const t = Number(c.time);
+    if (seenTimes.has(t)) continue;
+    seenTimes.add(t);
+    dedupCandles.push(c);
+  }
+  const candles = dedupCandles;
 
   const indicatorSource = !Array.isArray(marketPayload) && marketPayload.indicators ? marketPayload.indicators : {};
   const indicators = {
     ema_fast: (indicatorSource.ema_fast || []).map((item: any) => ({
-      time: toUnix(item.time || item.timestamp || item.dt || item.ts) ?? item.time ?? item.timestamp ?? item.dt ?? item.ts,
+      time: toUnix(item.time || item.timestamp || item.dt || item.ts),
       value: Number(item.value ?? item.ema_fast ?? item.ema),
-    })),
+    })).filter((i: any) => i.time),
     ema_slow: (indicatorSource.ema_slow || []).map((item: any) => ({
-      time: toUnix(item.time || item.timestamp || item.dt || item.ts) ?? item.time ?? item.timestamp ?? item.dt ?? item.ts,
+      time: toUnix(item.time || item.timestamp || item.dt || item.ts),
       value: Number(item.value ?? item.ema_slow ?? item.ema),
-    })),
+    })).filter((i: any) => i.time),
   };
 
-  const lastCandle = candleSource.length ? candleSource[candleSource.length - 1] : undefined;
-  const currentPrice =
-    (!Array.isArray(marketPayload) && marketPayload.lastPrice !== undefined
+  const currentPrice = endDate ? 0 :
+    ((!Array.isArray(marketPayload) && marketPayload.lastPrice !== undefined
       ? Number(marketPayload.lastPrice)
-      : undefined) ?? (candles.length ? candles[candles.length - 1].close : 0);
+      : undefined) ?? (candles.length ? candles[candles.length - 1].close : 0));
 
-  const atrHint = lastCandle && lastCandle.atr !== undefined ? Number(lastCandle.atr) : undefined;
-  const spreadHint =
-    !Array.isArray(marketPayload) && marketPayload.spread !== undefined
-      ? Number(marketPayload.spread)
-      : lastCandle && lastCandle.spread !== undefined
-      ? Number(lastCandle.spread)
-      : undefined;
-
-  const pivots = generatePivots(currentPrice, symbol, spreadHint, atrHint);
+  const pivots = generatePivots(candles, symbol);
 
   const tradesPayload = portfolioResponse.ok ? await portfolioResponse.json() : [];
   const trades: Trade[] = Array.isArray(tradesPayload) ? tradesPayload.map(normalizeTrade) : [];

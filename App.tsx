@@ -1,61 +1,92 @@
+// --- START OF FILE App.tsx ---
 
-import { Database, LayoutDashboard, LineChart, Loader2, Search, Settings, Wallet, X } from 'lucide-react';
-import React, { useEffect, useRef, useState } from 'react';
+import { Database, Loader2, Wallet } from 'lucide-react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import ChartComponent from './components/ChartComponent';
 import ForecastDashboard from './components/ForecastDashboard';
 import PortfolioModal from './components/PortfolioModal';
 import Sidebar from './components/Sidebar';
 import TimeframeSelector from './components/TimeframeSelector';
 import { fetchData, searchPairs } from './services/dataService';
+// Assicurati di aggiornare dataService per supportare i parametri di data!
+import { LayoutDashboard, LineChart, Search, Settings, X } from 'lucide-react';
 import { Candle, PivotLevel, Trade } from './types';
-
 const App: React.FC = () => {
-  const [loading, setLoading] = useState(true);
-  const [symbol, setSymbol] = useState('BTCUSD');
-  const [timeframe, setTimeframe] = useState('1D'); // NEW State
+  const [initialLoading, setInitialLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+
+  const [symbol, setSymbol] = useState('ETHEUR');
+  const [timeframe, setTimeframe] = useState('1h');
   const [viewMode, setViewMode] = useState<'CHART' | 'FORECAST'>('CHART');
 
   const [candles, setCandles] = useState<Candle[]>([]);
   const [trades, setTrades] = useState<Trade[]>([]);
   const [pivots, setPivots] = useState<PivotLevel[]>([]);
 
+  // Search Logic (invariata)
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<string[]>([]);
   const [isSearching, setIsSearching] = useState(false);
   const [showResults, setShowResults] = useState(false);
+  const [isPortfolioOpen, setIsPortfolioOpen] = useState(false);
   const searchRef = useRef<HTMLDivElement>(null);
 
-  const [isPortfolioOpen, setIsPortfolioOpen] = useState(false);
-
-  useEffect(() => {
-    const handleClickOutside = (event: MouseEvent) => {
-      if (searchRef.current && !searchRef.current.contains(event.target as Node)) {
-        setShowResults(false);
-      }
-    };
-    document.addEventListener("mousedown", handleClickOutside);
-    return () => document.removeEventListener("mousedown", handleClickOutside);
-  }, []);
-
+  // 1. Caricamento Iniziale (Reset Totale)
   useEffect(() => {
     if (viewMode === 'FORECAST') return;
 
-    const loadData = async () => {
-      setLoading(true);
+    const loadInitialData = async () => {
+      setInitialLoading(true);
+      setCandles([]); // Reset candele al cambio simbolo/timeframe
       try {
-        const data = await fetchData(symbol, timeframe); // Pass timeframe
+        // fetch iniziale senza endDate -> prende le ultime N candele (es. ultimi 5 giorni)
+        const data = await fetchData(symbol, timeframe, undefined);
         setCandles(data.candles);
         setTrades(data.trades);
         setPivots(data.pivots);
       } catch (error) {
-        console.error("Failed to fetch data:", error);
+        console.error("Failed to fetch initial data:", error);
       } finally {
-        setLoading(false);
+        setInitialLoading(false);
       }
     };
 
-    loadData();
-  }, [symbol, viewMode, timeframe]); // Reload when timeframe changes
+    loadInitialData();
+  }, [symbol, viewMode, timeframe]);
+
+  // 2. Funzione per caricare lo storico (Infinite Scroll)
+  const handleLoadMore = useCallback(async (earliestTimestamp: number) => {
+    if (loadingMore || initialLoading) return;
+
+    setLoadingMore(true);
+    try {
+      // Convertiamo il timestamp (ms) in formato data stringa per il DB
+      // earliestTimestamp è l'inizio del grafico attuale. Vogliamo dati PRIMA di questo.
+      const dateObj = new Date(earliestTimestamp);
+      const endDateString = dateObj.toISOString().slice(0, 19).replace('T', ' '); // '2025-11-27 08:00:00'
+
+      console.log(`Caricamento storico per ${symbol} prima del: ${endDateString}`);
+
+      // Chiamata API passando endDateString come limite superiore ("to")
+      // Il backend userà la query: WHERE timestamp < endDateString ORDER BY timestamp DESC LIMIT 500
+      const newHistoryData = await fetchData(symbol, timeframe, endDateString);
+
+      if (newHistoryData.candles.length > 0) {
+        setCandles(prevCandles => {
+          // Unione: Nuove candele (vecchie) + Candele Esistenti (nuove)
+          // Assicuriamoci che non ci siano duplicati basati sul tempo
+          const newCandlesFiltered = newHistoryData.candles.filter(
+            nc => !prevCandles.some(pc => pc.time === nc.time)
+          );
+          return [...newCandlesFiltered, ...prevCandles].sort((a, b) => new Date(a.time).getTime() - new Date(b.time).getTime());
+        });
+      }
+    } catch (err) {
+      console.error("Error loading history:", err);
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [symbol, timeframe, loadingMore, initialLoading]);
 
   const handleSearch = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const query = e.target.value;
@@ -79,10 +110,7 @@ const App: React.FC = () => {
   };
 
   const handleSelectSymbol = (newSymbol: string) => {
-    if (newSymbol !== symbol) {
-      setSymbol(newSymbol);
-    }
-    setSearchQuery('');
+    if (newSymbol !== symbol) setSymbol(newSymbol);
     setShowResults(false);
     setViewMode('CHART');
   };
@@ -90,13 +118,9 @@ const App: React.FC = () => {
   return (
     <div className="flex flex-col h-screen bg-gray-950 text-white overflow-hidden font-sans">
 
-      <PortfolioModal
-        isOpen={isPortfolioOpen}
-        onClose={() => setIsPortfolioOpen(false)}
-        onSelectTrade={handleSelectSymbol}
-      />
+      <PortfolioModal isOpen={isPortfolioOpen} onClose={() => setIsPortfolioOpen(false)} onSelectTrade={handleSelectSymbol} />
 
-      {/* Header */}
+      {/* Header omesso per brevità, identico a prima ... */}
       <header className="h-16 border-b border-gray-800 bg-gray-900 flex items-center justify-between px-4 shrink-0 gap-4">
         <div className="flex items-center gap-3 min-w-fit cursor-pointer" onClick={() => setViewMode('CHART')}>
           <div className="bg-blue-600 p-1.5 rounded-md">
@@ -159,6 +183,8 @@ const App: React.FC = () => {
         </div>
 
         <div className="flex items-center gap-2 sm:gap-4 min-w-fit">
+          <TimeframeSelector selected={timeframe} onSelect={setTimeframe} />
+
           <button
             onClick={() => setViewMode(viewMode === 'CHART' ? 'FORECAST' : 'CHART')}
             className={`flex items-center gap-2 px-3 py-2 rounded transition-colors font-medium text-sm border ${viewMode === 'FORECAST'
@@ -188,56 +214,35 @@ const App: React.FC = () => {
           </button>
         </div>
       </header>
-
-      {/* Main Content Area */}
-      <div className="flex flex-1 overflow-hidden">
-
+      <div className="flex flex-1 overflow-hidden min-w-0">
         {viewMode === 'FORECAST' ? (
-          <div className="w-full h-full">
-            <ForecastDashboard />
-          </div>
+          <ForecastDashboard />
         ) : (
-          <>
-            <main className="flex-1 relative flex flex-col">
-              {/* Timeframe Bar (In Main View) */}
-              <div className="h-10 border-b border-gray-800 bg-gray-900/50 flex items-center px-4 justify-between">
-                <div className="flex items-center gap-2">
-                  <span className="text-xs font-bold text-gray-400 uppercase tracking-wider mr-2">Interval</span>
-                  <TimeframeSelector selected={timeframe} onSelect={setTimeframe} />
-                </div>
+          <main className="flex-1 min-w-0 relative flex flex-col overflow-hidden">
+            {initialLoading ? (
+              <div className="flex-1 flex items-center justify-center flex-col gap-4">
+                <Loader2 className="w-10 h-10 text-blue-500 animate-spin" />
+                <p className="text-gray-500">Loading {symbol}...</p>
               </div>
-
-              {loading ? (
-                <div className="flex-1 flex items-center justify-center flex-col gap-4">
-                  <Loader2 className="w-10 h-10 text-blue-500 animate-spin" />
-                  <p className="text-gray-500 animate-pulse">Fetching {symbol} ({timeframe}) data...</p>
-                </div>
-              ) : (
-                <div className="w-full h-full">
-                  <ChartComponent
-                    data={candles}
-                    trades={trades}
-                    pivots={pivots}
-                    symbol={symbol}
-                    timeframe={timeframe}
-                  />
-                </div>
-              )}
-            </main>
-
-            <aside className="hidden md:block h-full shadow-2xl z-10">
-              <Sidebar trades={trades} onSelectTrade={handleSelectSymbol} />
-            </aside>
-          </>
+            ) : (
+              <div className="w-full h-full relative">
+                <ChartComponent
+                  data={candles}
+                  trades={trades}
+                  pivots={pivots}
+                  symbol={symbol}
+                  timeframe={timeframe}
+                  onRequestMore={handleLoadMore} // Passiamo la funzione
+                  isLoadingMore={loadingMore}    // Passiamo lo stato
+                />
+              </div>
+            )}
+          </main>
         )}
-
-      </div>
-
-      {viewMode === 'CHART' && (
-        <div className="md:hidden h-1/3 border-t border-gray-800 bg-gray-900 overflow-hidden">
+        <aside className="hidden md:block w-80 h-full border-l border-gray-800">
           <Sidebar trades={trades} onSelectTrade={handleSelectSymbol} />
-        </div>
-      )}
+        </aside>
+      </div>
     </div>
   );
 };

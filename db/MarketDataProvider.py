@@ -356,6 +356,42 @@ class MarketDataProvider:
             df[cols] = df[cols].astype(float)
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s')
             df.set_index('timestamp', inplace=True)
+
+            # --- MODIFICA AGGIORNATA: RESAMPLING COMPLETO ---
+            if not df.empty:
+                resample_rule = f"{mins}T"
+
+                # 1. Creiamo un nuovo DataFrame con tutti i buchi riempiti di NaN (resample)
+                # Includiamo 'count' e 'vwap' per completezza, anche se non usati dal DB
+                df_resampled = df.resample(resample_rule).agg({
+                    'Open': 'first',
+                    'High': 'max',
+                    'Low': 'min',
+                    'Close': 'last',
+                    'Volume': 'sum',
+                    'count': 'sum',
+                    'vwap': 'last' # Vwap teorico dell'ultimo trade
+                })
+
+                # 2. RIEMPIMENTO "BUCHI" (Candele piatte)
+                # Se un minuto non ha scambi, Open=High=Low=Close = Close precedente
+
+                # Forward fill su Close: il prezzo rimane quello dell'ultima chiusura nota
+                df_resampled['Close'] = df_resampled['Close'].ffill()
+
+                # Le altre colonne di prezzo prendono il valore di Close appena calcolato
+                df_resampled['Open'] = df_resampled['Open'].fillna(df_resampled['Close'])
+                df_resampled['High'] = df_resampled['High'].fillna(df_resampled['Close'])
+                df_resampled['Low'] = df_resampled['Low'].fillna(df_resampled['Close'])
+                df_resampled['vwap'] = df_resampled['vwap'].fillna(df_resampled['Close'])
+
+                # Volume e Count a 0 dove mancavano dati
+                df_resampled['Volume'] = df_resampled['Volume'].fillna(0)
+                df_resampled['count'] = df_resampled['count'].fillna(0)
+
+                # Rimuoviamo eventuali righe iniziali che sono ancora NaN (se il primo dato manca)
+                df = df_resampled.dropna()
+
             return df
         except Exception:
             return pd.DataFrame()
@@ -451,13 +487,17 @@ if __name__ == "__main__":
 
     # Stampa le prime 3 per esempio
     for p in all_pairs:
+        # print(f" - {p['pair']} (ID: {p['kr_pair']}) -> Min Order: {p['pair_limits']['ordermin']}")
+        # data_1d = provider.getCandles(p['pair'], "1d", "1mo", truncate_to="30d")
+        # data_4h = provider.getCandles(p['pair'], "4h", "5d", truncate_to="5d")
+        # data_1h = provider.getCandles(p['pair'], "1h", "1d", truncate_to="6h")
+        # data_15m = provider.getCandles(p['pair'], "15m", "1d", truncate_to="2h")
+        # data_5m = provider.getCandles(p['pair'], "5m", "1d", truncate_to="30m")
+        # data_now = provider.getCandles(p['pair'], "now")
+        # merged_data = provider.merge_candles_data(data_1d, data_4h, data_1h, data_15m, data_5m, data_now)
+        # provider.print_candles(merged_data)
+        # print(f" - {p['pair']} (ID: {p['kr_pair']}) -> Min Order: {p['pair_limits']['ordermin']}")
         print(f" - {p['pair']} (ID: {p['kr_pair']}) -> Min Order: {p['pair_limits']['ordermin']}")
-        data_1d = provider.getCandles(p['pair'], "1d", "1mo", truncate_to="30d")
-        data_4h = provider.getCandles(p['pair'], "4h", "5d", truncate_to="5d")
-        data_1h = provider.getCandles(p['pair'], "1h", "1d", truncate_to="6h")
-        data_15m = provider.getCandles(p['pair'], "15m", "1d", truncate_to="2h")
-        data_5m = provider.getCandles(p['pair'], "5m", "1d", truncate_to="30m")
-        data_now = provider.getCandles(p['pair'], "now")
-        merged_data = provider.merge_candles_data(data_1d, data_4h, data_1h, data_15m, data_5m, data_now)
-        provider.print_candles(merged_data)
-        print(f" - {p['pair']} (ID: {p['kr_pair']}) -> Min Order: {p['pair_limits']['ordermin']}")
+        data_1m = provider.getCandles(p['pair'], "1m", "1d")
+        provider.print_candles(data_1m)
+

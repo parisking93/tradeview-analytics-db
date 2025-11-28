@@ -104,15 +104,27 @@ class DatabaseManager:
                 print(f"[ERROR] Coppia senza nome trovata.")
                 return
 
-            # Query: 19 segnaposto (%s)
+            # MODIFICA: Uso ON DUPLICATE KEY UPDATE invece di INSERT IGNORE
+            # Questo evita duplicati se esiste un indice UNIQUE(pair, timeframe, timestamp)
             query = f"""
-                INSERT IGNORE INTO {safe_table} (
+                INSERT INTO {safe_table} (
                     pair, kr_pair, base, quote,
                     timestamp, open, high, low, close, volume,
                     bid, ask, mid, spread,
                     ema_fast, ema_slow, rsi, atr, timeframe,
                     created_at
                 ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                ON DUPLICATE KEY UPDATE
+                    open = VALUES(open),
+                    high = VALUES(high),
+                    low = VALUES(low),
+                    close = VALUES(close),
+                    volume = VALUES(volume),
+                    ema_fast = VALUES(ema_fast),
+                    ema_slow = VALUES(ema_slow),
+                    rsi = VALUES(rsi),
+                    atr = VALUES(atr),
+                    created_at = NOW()
             """
 
             data_tuples = []
@@ -145,7 +157,7 @@ class DatabaseManager:
             try:
                 self.cursor.executemany(query, data_tuples)
                 self.conn.commit()
-                print(f" -> Inserite/Aggiornate {self.cursor.rowcount} candele per {p_pair}")
+                print(f" -> Inserite/Aggiornate {self.cursor.rowcount} righe per {p_pair}")
             except mysql.connector.Error as err:
                 print(f"Errore insert_currency_data: {err}")
                 self.conn.rollback()

@@ -25,12 +25,8 @@ def main():
     # Recupero Info Coppia
     pair_info = market_prov.getPair(TARGET_PAIR)
 
-    # Recupero Candele (Merge di vari timeframe)
-    data_1d = market_prov.getCandles(TARGET_PAIR, "1d", "1mo")
-    data_4h = market_prov.getCandles(TARGET_PAIR, "4h", "5d")
-    data_now = market_prov.getCandles(TARGET_PAIR, "now")
+    # data_now = market_prov.getCandles(TARGET_PAIR, "now")
 
-    merged_candles = market_prov.merge_candles_data(data_1d, data_4h, data_now)
 
     # 3. SALVATAGGIO NEL DATABASE
     print("\n[3] Salvataggio Database...")
@@ -43,7 +39,7 @@ def main():
 
     # B. Salva Dati Currency (Market Data)
     # Nota: Funziona solo se esiste la coppia in pair_limits nel DB
-    db.insert_currency_data(merged_candles, pair_info)
+    # db.insert_currency_data(merged_candles, pair_info)
 
     db.close_connection()
     print("\n=== FINE ===")
@@ -66,18 +62,18 @@ def main3():
     all_pairs_eur = market_prov.getAllPairs(quote_filter="EUR", leverage_only=True)
     for p in all_pairs_eur:
         # currency = market_prov.getCandles(p['pair'], "15m", "1mo")
-        data_1d = market_prov.getCandles(p['pair'], "1d", "5d",)
-        data_4h = market_prov.getCandles(p['pair'], "4h", "5d",)
-        data_1h = market_prov.getCandles(p['pair'], "1h", "5d", )
-        data_15m = market_prov.getCandles(p['pair'], "15m", "1d")
-        data_5m = market_prov.getCandles(p['pair'], "5m", "1d")
-        currency = market_prov.getCandles(p['pair'], "1m", "1d")
-        db.insert_currency_data(data_1d, p,"currency")
+        # data_1d = market_prov.getCandles(p['pair'], "1d", "5d",)
+        data_4h = market_prov.getCandles(p['pair'], "4h", "1mo",)
+        data_1h = market_prov.getCandles(p['pair'], "1h", "1mo", )
+        # data_15m = market_prov.getCandles(p['pair'], "15m", "1d")
+        # data_5m = market_prov.getCandles(p['pair'], "5m", "1d")
+        # currency = market_prov.getCandles(p['pair'], "1m", "1d")
+        # db.insert_currency_data(data_1d, p,"currency")
         db.insert_currency_data(data_4h, p,"currency")
         db.insert_currency_data(data_1h, p,"currency")
-        db.insert_currency_data(data_15m, p,"currency")
-        db.insert_currency_data(data_5m, p,"currency")
-        db.insert_currency_data(currency, p,"currency")
+        # db.insert_currency_data(data_15m, p,"currency")
+        # db.insert_currency_data(data_5m, p,"currency")
+        # db.insert_currency_data(currency, p,"currency")
 
     # 2. Salva le coppie nel DB (Operazione una tantum o di aggiornamento)
 
@@ -87,5 +83,5 @@ def main3():
 
 if __name__ == "__main__":
     # main2()
-    main3()
-    # main()
+    # main3()
+    main()

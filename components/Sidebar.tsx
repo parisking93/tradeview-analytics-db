@@ -9,7 +9,7 @@ interface SidebarProps {
 
 const Sidebar: React.FC<SidebarProps> = ({ trades, onSelectTrade }) => {
   return (
-    <div className="w-full md:w-96 bg-gray-950 border-l border-gray-800 h-full flex flex-col overflow-hidden">
+    <div className="w-full h-full bg-gray-950 border-l border-gray-800 flex flex-col overflow-hidden">
       <div className="p-4 border-b border-gray-800">
         <h3 className="text-lg font-semibold text-white flex items-center gap-2">
           <TrendingUp className="w-5 h-5 text-blue-400" />
