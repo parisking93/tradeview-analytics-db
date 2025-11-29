@@ -11,6 +11,7 @@ const ForecastDashboard: React.FC = () => {
     const [selectedTrade, setSelectedTrade] = useState<Trade | null>(null);
     const [timeframe, setTimeframe] = useState('1h'); // Default better for forecast
     const [chartData, setChartData] = useState<{ candles: Candle[], forecast: Candle[] }>({ candles: [], forecast: [] });
+    const [displayMode, setDisplayMode] = useState<'candles' | 'line'>('candles');
     const [loading, setLoading] = useState(true);
     const [loadingChart, setLoadingChart] = useState(false);
 
@@ -72,6 +73,14 @@ const ForecastDashboard: React.FC = () => {
                         <span className="text-xs font-bold text-gray-400 uppercase tracking-wider mr-2">Interval</span>
                         <TimeframeSelector selected={timeframe} onSelect={setTimeframe} />
                      </div>
+                     <div className="flex items-center gap-2">
+                        <button
+                          onClick={() => setDisplayMode(prev => prev === 'candles' ? 'line' : 'candles')}
+                          className="px-3 py-1.5 rounded-md border border-gray-700 bg-gray-800 hover:bg-gray-700 text-xs font-semibold text-gray-200 transition-colors"
+                        >
+                          Switch Mode: {displayMode === 'candles' ? 'Candles' : 'Line'}
+                        </button>
+                     </div>
                 </div>
 
                 <div className="flex-1 w-full relative min-w-0">
@@ -87,6 +96,7 @@ const ForecastDashboard: React.FC = () => {
                                 activeTrade={selectedTrade}
                                 symbol={selectedTrade.symbol}
                                 timeframe={timeframe}
+                                displayMode={displayMode}
                             />
                         )
                     ) : (

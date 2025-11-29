@@ -141,7 +141,20 @@ app.get("/api/market/:symbol", async (req, res) => {
     forecastSQL += ` ORDER BY STR_TO_DATE(timestamp, '%Y-%m-%d %H:%i:%s') DESC LIMIT ?`;
     forecastParams.push(limit);
 
-    const [forecastRows] = await pool.query(forecastSQL, forecastParams);
+    let [forecastRows] = await pool.query(forecastSQL, forecastParams);
+
+    // Fallback: se non ci sono previsioni per quel timeframe, prende le più recenti per la coppia
+    if (!(forecastRows as any[]).length) {
+      const fallbackForecastSQL = `
+        SELECT pair, kr_pair, base, quote, timestamp, open, high, low, close, volume,
+               ema_fast, ema_slow, rsi, atr, bid, ask, mid, spread, timeframe
+        FROM forecast
+        WHERE (pair = ? OR kr_pair = ? OR REPLACE(pair, '/', '') = ? OR pair LIKE ?)
+        ORDER BY STR_TO_DATE(timestamp, '%Y-%m-%d %H:%i:%s') DESC
+        LIMIT ?
+      `;
+      forecastRows = (await pool.query(fallbackForecastSQL, [resolved.pair, resolved.kr_pair, compact, `%${symbol}%`, limit]))[0] as any[];
+    }
 
     if (!(rows as any[]).length && !(forecastRows as any[]).length) {
       return res.json({ symbol: resolved.pair || symbol, timeframe: targetTimeframe, candles: [], forecast: [], indicators: {}, lastPrice: 0, count: 0 });

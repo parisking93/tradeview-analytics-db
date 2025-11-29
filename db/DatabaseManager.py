@@ -258,3 +258,33 @@ class DatabaseManager:
         except mysql.connector.Error as err:
             print(f"Errore select_all su {safe_table}: {err}")
             return []
+
+    def get_candles_with_offset(self, table_name: str, timeframe: str, base: str, offset: int):
+        """
+        Restituisce le righe ordinate per timestamp desc con offset personalizzato.
+        Esempio query:
+        SELECT * FROM currency
+        WHERE timeframe = '1d' AND base = 'ETH'
+        ORDER BY STR_TO_DATE(`timestamp`, '%Y-%m-%d %H:%i:%s') DESC
+        LIMIT 18446744073709551615 OFFSET 118;
+        """
+        safe_table = "".join(ch for ch in table_name if ch.isalnum() or ch == '_')
+        if not safe_table:
+            print(f"[ERROR] Nome tabella non valido: {table_name}")
+            return []
+
+        query = f"""
+            SELECT *
+            FROM {safe_table}
+            WHERE timeframe = %s AND base = %s
+            ORDER BY CAST(`timestamp` AS DATETIME) DESC
+            LIMIT 18446744073709551615 OFFSET %s
+        """
+        try:
+            self.cursor.execute(query, (timeframe, base, int(offset)))
+            rows = self.cursor.fetchall()
+            columns = [col[0] for col in self.cursor.description] if self.cursor.description else []
+            return [dict(zip(columns, row)) for row in rows]
+        except mysql.connector.Error as err:
+            print(f"Errore get_candles_with_offset su {safe_table}: {err}")
+            return []

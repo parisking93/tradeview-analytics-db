@@ -6,6 +6,7 @@ import {
   IChartApi, 
   Time, 
   CandlestickSeries,
+  LineSeries,
   LineStyle
 } from 'lightweight-charts';
 import { Candle, Trade } from '../types';
@@ -17,6 +18,7 @@ interface ForecastChartProps {
   activeTrade?: Trade; 
   symbol: string;
   timeframe?: string;
+  displayMode?: 'candles' | 'line';
 }
 
 const toUnix = (value: any) => {
@@ -31,7 +33,7 @@ const toUnix = (value: any) => {
   return Math.floor(date.getTime() / 1000);
 };
 
-const ForecastChart: React.FC<ForecastChartProps> = ({ candles, forecast, activeTrade, symbol, timeframe = '1D' }) => {
+const ForecastChart: React.FC<ForecastChartProps> = ({ candles, forecast, activeTrade, symbol, timeframe = '1D', displayMode = 'candles' }) => {
   const chartContainerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
 
@@ -61,57 +63,77 @@ const ForecastChart: React.FC<ForecastChartProps> = ({ candles, forecast, active
 
     chartRef.current = chart;
 
-    const candleSeries = chart.addSeries(CandlestickSeries, {
-      upColor: '#60a5fa', 
-      downColor: '#1e3a8a',
-      borderVisible: false,
-      wickUpColor: '#60a5fa',
-      wickDownColor: '#1e3a8a',
-    });
+    const marketSeries = displayMode === 'candles'
+      ? chart.addSeries(CandlestickSeries, {
+          upColor: '#60a5fa',
+          downColor: '#1e3a8a',
+          borderVisible: false,
+          wickUpColor: '#60a5fa',
+          wickDownColor: '#1e3a8a',
+        })
+      : chart.addSeries(LineSeries, {
+          color: '#60a5fa',
+          lineWidth: 2,
+        });
 
-    const forecastSeries = chart.addSeries(CandlestickSeries, {
-      upColor: '#fbbf24', // giallo
-      downColor: '#a855f7', // viola
-      borderVisible: false,
-      wickUpColor: '#fbbf24',
-      wickDownColor: '#a855f7',
-    });
+    const forecastSeries = displayMode === 'candles'
+      ? chart.addSeries(CandlestickSeries, {
+          upColor: '#fbbf24', // giallo
+          downColor: '#a855f7', // viola
+          borderVisible: false,
+          wickUpColor: '#fbbf24',
+          wickDownColor: '#a855f7',
+        })
+      : chart.addSeries(LineSeries, {
+          color: '#fbbf24',
+          lineWidth: 2,
+        });
     
     // Map data to Unix Timestamps
     const candleData = candles
       .map(d => {
         const t = toUnix(d.time);
         if (t === undefined) return null;
-        return {
-          time: t as Time,
-          open: d.open,
-          high: d.high,
-          low: d.low,
-          close: d.close
-        };
+        return displayMode === 'candles'
+          ? {
+              time: t as Time,
+              open: d.open,
+              high: d.high,
+              low: d.low,
+              close: d.close
+            }
+          : {
+              time: t as Time,
+              value: d.close
+            };
       })
       .filter(Boolean) as any[];
-    candleSeries.setData(candleData);
+    marketSeries.setData(candleData);
 
     if (forecast.length > 0) {
       const forecastData = forecast
         .map(f => {
           const t = toUnix(f.time);
           if (t === undefined) return null;
-          return {
-            time: t as Time,
-            open: f.open,
-            high: f.high,
-            low: f.low,
-            close: f.close
-          };
+          return displayMode === 'candles'
+            ? {
+                time: t as Time,
+                open: f.open,
+                high: f.high,
+                low: f.low,
+                close: f.close
+              }
+            : {
+                time: t as Time,
+                value: f.close
+              };
         })
         .filter(Boolean) as any[];
       forecastSeries.setData(forecastData);
     }
 
     if (activeTrade) {
-        candleSeries.createPriceLine({
+        marketSeries.createPriceLine({
             price: activeTrade.entryPrice,
             color: '#ffffff',
             lineWidth: 2,
@@ -119,7 +141,7 @@ const ForecastChart: React.FC<ForecastChartProps> = ({ candles, forecast, active
             axisLabelVisible: true,
             title: 'ENTRY',
         });
-        candleSeries.createPriceLine({
+        marketSeries.createPriceLine({
             price: activeTrade.takeProfit,
             color: '#4ade80',
             lineWidth: 2,
@@ -127,7 +149,7 @@ const ForecastChart: React.FC<ForecastChartProps> = ({ candles, forecast, active
             axisLabelVisible: true,
             title: 'TP',
         });
-        candleSeries.createPriceLine({
+        marketSeries.createPriceLine({
             price: activeTrade.stopLoss,
             color: '#f87171',
             lineWidth: 2,
@@ -163,7 +185,7 @@ const ForecastChart: React.FC<ForecastChartProps> = ({ candles, forecast, active
       chart.remove();
       chartRef.current = null;
     };
-  }, [candles, forecast, activeTrade]);
+  }, [candles, forecast, activeTrade, displayMode, timeframe]);
 
   return (
     <div className="relative w-full h-full group">
@@ -175,12 +197,11 @@ const ForecastChart: React.FC<ForecastChartProps> = ({ candles, forecast, active
             <div className="flex flex-col gap-2 mt-2 text-xs font-mono">
               <div className="flex items-center gap-2">
                   <div className="w-4 h-0.5 bg-blue-300"></div>
-                  <span className="text-gray-300">Market candles</span>
+                  <span className="text-gray-300">Market {displayMode === 'candles' ? 'candles' : 'line (close)'} </span>
               </div>
               <div className="flex items-center gap-2">
                   <div className="w-4 h-0.5 bg-amber-300"></div>
-                  <div className="w-4 h-0.5 bg-purple-400"></div>
-                  <span className="text-gray-300">Forecast candles ({timeframe}+1)</span>
+                  <span className="text-gray-300">Forecast {displayMode === 'candles' ? 'candles' : 'line (close)'} ({timeframe}+1)</span>
               </div>
             </div>
         </div>
