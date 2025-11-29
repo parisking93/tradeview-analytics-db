@@ -18,6 +18,7 @@ export interface Trade {
   id: number;
   symbol: string; // Maps to 'pair' in currency table
   entryDate: string; // 'yyyy-mm-dd'
+  createdAt?: string;
   type: TradeType;
   entryPrice: number;
   stopLoss: number;

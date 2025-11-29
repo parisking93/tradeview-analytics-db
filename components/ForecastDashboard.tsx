@@ -12,6 +12,7 @@ const ForecastDashboard: React.FC = () => {
     const [timeframe, setTimeframe] = useState('1h'); // Default better for forecast
     const [chartData, setChartData] = useState<{ candles: Candle[], forecast: Candle[] }>({ candles: [], forecast: [] });
     const [displayMode, setDisplayMode] = useState<'candles' | 'line'>('candles');
+    const [showForecastBand, setShowForecastBand] = useState(true);
     const [loading, setLoading] = useState(true);
     const [loadingChart, setLoadingChart] = useState(false);
 
@@ -75,11 +76,25 @@ const ForecastDashboard: React.FC = () => {
                      </div>
                      <div className="flex items-center gap-2">
                         <button
-                          onClick={() => setDisplayMode(prev => prev === 'candles' ? 'line' : 'candles')}
+                          onClick={() => {
+                            const next = displayMode === 'candles' ? 'line' : 'candles';
+                            setDisplayMode(next);
+                            if (next === 'candles') setShowForecastBand(true);
+                          }}
                           className="px-3 py-1.5 rounded-md border border-gray-700 bg-gray-800 hover:bg-gray-700 text-xs font-semibold text-gray-200 transition-colors"
                         >
                           Switch Mode: {displayMode === 'candles' ? 'Candles' : 'Line'}
                         </button>
+                        {displayMode === 'line' && (
+                          <button
+                            onClick={() => setShowForecastBand(v => !v)}
+                            className={`px-3 py-1.5 rounded-md border text-xs font-semibold transition-colors ${showForecastBand
+                              ? 'border-green-700 bg-green-900/40 text-green-200 hover:bg-green-900/60'
+                              : 'border-gray-700 bg-gray-800 text-gray-200 hover:bg-gray-700'}`}
+                          >
+                            {showForecastBand ? 'Hide Band' : 'Show Band'}
+                          </button>
+                        )}
                      </div>
                 </div>
 
@@ -97,6 +112,7 @@ const ForecastDashboard: React.FC = () => {
                                 symbol={selectedTrade.symbol}
                                 timeframe={timeframe}
                                 displayMode={displayMode}
+                                showBand={showForecastBand}
                             />
                         )
                     ) : (

@@ -52,11 +52,13 @@ const mapOrderRowToTrade = (row: any) => {
   const dateSource = row.record_date || row.created_at;
   const entryDate = dateSource ? new Date(dateSource).toISOString().slice(0, 10) : "";
   const entryPrice = row.price_entry ?? row.price_avg ?? row.price ?? row.value_eur ?? 0;
+  const createdAt = row.created_at ? new Date(row.created_at).toISOString() : undefined;
   return {
     id: Number(row.id),
     symbol, entryDate, type, entryPrice: Number(entryPrice),
     stopLoss: Number(row.stop_loss || 0), takeProfit: Number(row.take_profit || 0),
     status, pnl: row.pnl !== null && row.pnl !== undefined ? Number(row.pnl) : undefined,
+    createdAt
   };
 };
 
@@ -226,7 +228,7 @@ app.get("/api/market/:symbol", async (req, res) => {
 // ... Portfolio endpoint
 app.get("/api/portfolio", async (_req, res) => {
   // ... invariato
-  const [rows] = await pool.query(`SELECT * FROM orders WHERE created_at > NOW() - INTERVAL 1 DAY ORDER BY created_at DESC`);
+  const [rows] = await pool.query(`SELECT * FROM orders WHERE created_at > NOW() - INTERVAL 2 DAY ORDER BY created_at DESC`);
   const trades = (rows as any[]).map(mapOrderRowToTrade);
   return res.json(trades);
 });

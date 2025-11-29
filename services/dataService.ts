@@ -70,6 +70,7 @@ const normalizeTrade = (raw: any): Trade => {
   const entryDate = entryDateSource
     ? new Date(entryDateSource).toISOString().slice(0, 10)
     : '';
+  const createdAt = raw.created_at ? new Date(raw.created_at).toISOString() : undefined;
 
   const entryPrice = raw.entryPrice ?? raw.price_entry ?? raw.price_avg ?? raw.price ?? 0;
 
@@ -83,6 +84,7 @@ const normalizeTrade = (raw: any): Trade => {
     takeProfit: Number(raw.takeProfit ?? raw.take_profit ?? 0),
     status,
     pnl: raw.pnl !== null && raw.pnl !== undefined ? Number(raw.pnl) : undefined,
+    createdAt,
   };
 };
 

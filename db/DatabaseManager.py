@@ -4,6 +4,7 @@ import os
 import json
 import mysql.connector
 from dotenv import load_dotenv
+from datetime import datetime, timedelta
 
 class DatabaseManager:
     def __init__(self):
@@ -288,3 +289,132 @@ class DatabaseManager:
         except mysql.connector.Error as err:
             print(f"Errore get_candles_with_offset su {safe_table}: {err}")
             return []
+
+
+    def get_candles_before_date(self, table_name: str, timeframe: str, base: str, cutoff_datetime):
+        """
+        Restituisce le righe per timeframe/base con timestamp < cutoff_datetime,
+        ordinate per timestamp DESC.
+
+        Esempio query:
+        SELECT * FROM currency
+        WHERE timeframe = '1h' AND base = 'ETH'
+        AND CAST(`timestamp` AS DATETIME) < '2025-11-27 00:00:00'
+        ORDER BY CAST(`timestamp` AS DATETIME) DESC;
+        """
+        # sanitize nome tabella
+        safe_table = "".join(ch for ch in table_name if ch.isalnum() or ch == '_')
+        if not safe_table:
+            print(f"[ERROR] Nome tabella non valido: {table_name}")
+            return []
+
+        query = f"""
+            SELECT *
+            FROM {safe_table}
+            WHERE timeframe = %s
+            AND base = %s
+            AND CAST(`timestamp` AS DATETIME) < %s
+            ORDER BY CAST(`timestamp` AS DATETIME) DESC
+        """
+
+        try:
+            # cutoff_datetime può essere una stringa 'YYYY-MM-DD HH:MM:SS'
+            # oppure un oggetto datetime; mysql.connector lo gestisce
+            self.cursor.execute(query, (timeframe, base, cutoff_datetime))
+            rows = self.cursor.fetchall()
+            columns = [col[0] for col in self.cursor.description] if self.cursor.description else []
+            return [dict(zip(columns, row)) for row in rows]
+        except mysql.connector.Error as err:
+            print(f"Errore get_candles_before_date su {safe_table}: {err}")
+            return []
+
+    def add_timeframe(self, date_str: str, timeframe: str) -> str:
+        """
+        date_str: stringa nel formato 'YYYY-MM-DD HH:MM:SS'
+        timeframe: uno tra '1m','5m','15m','1h','4h','1d'
+        return: nuova data come stringa 'YYYY-MM-DD HH:MM:SS'
+        """
+        dt = datetime.strptime(date_str, "%Y-%m-%d %H:%M:%S")
+
+        tf_map = {
+            "1m": timedelta(minutes=1),
+            "5m": timedelta(minutes=5),
+            "15m": timedelta(minutes=15),
+            "1h": timedelta(hours=1),
+            "4h": timedelta(hours=4),
+            "1d": timedelta(days=1),
+        }
+
+        if timeframe not in tf_map:
+            raise ValueError(f"Timeframe non supportato: {timeframe}")
+
+        new_dt = dt + tf_map[timeframe]
+        return new_dt.strftime("%Y-%m-%d %H:%M:%S")
+
+
+    def is_after(self, date1: str, date2: str) -> bool:
+        fmt = "%Y-%m-%d %H:%M:%S"
+        return datetime.strptime(date1, fmt) > datetime.strptime(date2, fmt)
+
+
+    def get_trading_context(self, base_currency: str, history_config: dict):
+        """
+        Recupera:
+        1. Candele storiche per i timeframe richiesti.
+        2. Ordine aperto (se esiste).
+        3. Forecast (se esiste).
+        """
+        context_data = {
+            "candles": {},
+            "order": None,
+            "forecast": []
+        }
+
+        # 1. Recupero Candele Storiche
+        # Assumiamo che history_config sia tipo {"1d": 10, "1h": 20}
+        for tf, limit in history_config.items():
+            query = """
+                SELECT * FROM currency
+                WHERE base = %s AND timeframe = %s
+                ORDER BY timestamp DESC
+                LIMIT %s
+            """
+            try:
+                self.cursor.execute(query, (base_currency, tf, limit))
+                # Convertiamo in dizionari
+                columns = [col[0] for col in self.cursor.description]
+                rows = [dict(zip(columns, row)) for row in self.cursor.fetchall()]
+                context_data["candles"][tf] = rows
+            except mysql.connector.Error as err:
+                print(f"Error fetching candles {tf}: {err}")
+
+        # 2. Recupero Ordine Aperto
+        query_order = """
+            SELECT * FROM orders
+            WHERE base = %s AND status = 'OPEN'
+            ORDER BY created_at DESC LIMIT 1
+        """
+        try:
+            self.cursor.execute(query_order, (base_currency,))
+            res = self.cursor.fetchone()
+            if res:
+                columns = [col[0] for col in self.cursor.description]
+                context_data["order"] = dict(zip(columns, res))
+        except mysql.connector.Error as err:
+             print(f"Error fetching order: {err}")
+
+        # 3. Recupero Forecast
+        # Assumiamo tabella 'forecast' con struttura simile a currency
+        query_forecast = """
+            SELECT * FROM forecast
+            WHERE base = %s
+            ORDER BY timestamp DESC LIMIT 3
+        """
+        try:
+            self.cursor.execute(query_forecast, (base_currency,))
+            columns = [col[0] for col in self.cursor.description]
+            context_data["forecast"] = [dict(zip(columns, row)) for row in self.cursor.fetchall()]
+        except mysql.connector.Error:
+            pass # Forecast opzionale
+
+        return context_data
