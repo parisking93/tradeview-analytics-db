@@ -291,7 +291,7 @@ class DatabaseManager:
             return []
 
 
-    def get_candles_before_date(self, table_name: str, timeframe: str, base: str, cutoff_datetime):
+    def get_candles_before_date(self, table_name: str, timeframe: str, base: str, cutoff_datetime, limit: None):
         """
         Restituisce le righe per timeframe/base con timestamp < cutoff_datetime,
         ordinate per timestamp DESC.
@@ -320,7 +320,11 @@ class DatabaseManager:
         try:
             # cutoff_datetime può essere una stringa 'YYYY-MM-DD HH:MM:SS'
             # oppure un oggetto datetime; mysql.connector lo gestisce
-            self.cursor.execute(query, (timeframe, base, cutoff_datetime))
+            if limit is not None:
+                query += " LIMIT %s"
+                self.cursor.execute(query, (timeframe, base, cutoff_datetime, limit))
+            else:
+                self.cursor.execute(query, (timeframe, base, cutoff_datetime))
             rows = self.cursor.fetchall()
             columns = [col[0] for col in self.cursor.description] if self.cursor.description else []
             return [dict(zip(columns, row)) for row in rows]
@@ -367,7 +371,8 @@ class DatabaseManager:
         context_data = {
             "candles": {},
             "order": None,
-            "forecast": []
+            "forecast": [],
+            "wallet_balance": 0.0
         }
 
         # 1. Recupero Candele Storiche
@@ -417,4 +422,108 @@ class DatabaseManager:
         except mysql.connector.Error:
             pass # Forecast opzionale
 
+        query_wallet = """
+            SELECT totale_portafoglio_disponibile
+            FROM wallet
+            ORDER BY created_at DESC
+            LIMIT 1
+        """
+        try:
+            self.cursor.execute(query_wallet)
+            res = self.cursor.fetchone()
+            if res:
+                # res[0] contiene il valore float
+                context_data["wallet_balance"] = float(res[0])
+        except mysql.connector.Error as err:
+            print(f"Error fetching wallet: {err}")
+
         return context_data
+
+
+    def get_trading_context_traning(
+        self,
+        base_currency: str,
+        history_config: dict,
+        pivot_timestamp,
+        history_config_forecast: dict,
+        forecast_forward_tf: str,
+        forecast_limit: int = 3
+    ):
+        """
+        Recupera:
+        1. Candele storiche fino al pivot_timestamp per i timeframe richiesti.
+        2. Ordine aperto (se esiste) valido fino al pivot_timestamp.
+        3. Forecast nel range [pivot_timestamp, pivot_timestamp + forecast_forward_tf].
+        """
+        context_data = {
+            "candles": {},
+            "order": None,
+            "forecast": [],
+            "wallet_balance": 0.0
+        }
+
+        # Normalizza il timestamp di riferimento in stringa compatibile col DB
+        pivot_ts_str = pivot_timestamp.strftime("%Y-%m-%d %H:%M:%S") if isinstance(pivot_timestamp, datetime) else str(pivot_timestamp)
+        # Formato timestamp MySQL (si usa inline per evitare problemi con i placeholder %s)
+        ts_format = "%Y-%m-%d %H:%i:%s"
+        ts_expr = f"STR_TO_DATE(`timestamp`, '{ts_format}')"
+
+        # 1. Recupero Candele Storiche
+        # Assumiamo che history_config sia tipo {"1d": 10, "1h": 20}
+        for tf, limit in history_config.items():
+            context_data["candles"][tf] = self.get_candles_before_date(table_name="currency", timeframe=tf, base=base_currency, cutoff_datetime=pivot_ts_str, limit=limit)
+        # 2. Recupero Ordine Aperto
+        query_order = """
+            SELECT * FROM orders
+            WHERE base = %s AND status = 'OPEN'
+              AND created_at <= %s
+            ORDER BY created_at DESC LIMIT 1
+        """
+        try:
+            self.cursor.execute(query_order, (base_currency, pivot_ts_str))
+            res = self.cursor.fetchone()
+            if res:
+                columns = [col[0] for col in self.cursor.description]
+                context_data["order"] = dict(zip(columns, res))
+        except mysql.connector.Error as err:
+             print(f"Error fetching order: {err}")
+
+        # 3. Recupero Forecast: range dal pivot al pivot + forecast_forward_tf
+        try:
+            forecast_upper = self.add_timeframe(pivot_ts_str, forecast_forward_tf)
+        except ValueError as err:
+            print(f"Error computing forecast upper bound: {err}")
+            forecast_upper = None
+
+        if forecast_upper:
+            for tf, forecast_limit in history_config_forecast.items():
+                # context_data['forecast'].append((self.get_candles_before_date(table_name="forecast", timeframe=tf, base=base_currency, cutoff_datetime=forecast_upper, limit=forecast_limit))[0])
+                fc_result = self.get_candles_before_date(
+                    table_name="forecast",
+                    timeframe=tf,
+                    base=base_currency,
+                    cutoff_datetime=forecast_upper,
+                    limit=forecast_limit
+                )
+                # Aggiungiamo solo se la lista non è vuota
+                if fc_result and len(fc_result) > 0:
+                    context_data['forecast'].append(fc_result[0])
+
+        # 4. Recupero Wallet Balance
+        query_wallet = """
+            SELECT totale_portafoglio_disponibile
+            FROM wallet
+            ORDER BY created_at DESC
+            LIMIT 1
+        """
+        try:
+            self.cursor.execute(query_wallet)
+            res = self.cursor.fetchone()
+            if res:
+                # res[0] contiene il valore float
+                context_data["wallet_balance"] = float(res[0])
+        except mysql.connector.Error as err:
+            print(f"Error fetching wallet: {err}")
+
+        return context_data
+# --- END OF FILE DatabaseManager.py ---

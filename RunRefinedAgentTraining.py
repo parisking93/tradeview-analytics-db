@@ -27,14 +27,15 @@ def run_brain_cycle(pair: dict):
     HALT_THRESHOLD = 0.75   # Se il modello è sicuro al 85% di fermarsi, si ferma
     # Configurazione Timeframe (Deve combaciare con Vectorizer e Modello)
     tf_config = {"1d": 30, "4h": 50, "1h": 100}
-
+    tf_config_forecast = {"1d+1": 1, "1d+2": 1, "4h+1": 1, "4h+2": 1}
+    timeD = "2025-11-29 12:00:00"
     print(f"\n--- 1. AVVIO SISTEMA PER {PAIR} ---")
 
     # A. CONNESSIONE DB
     try:
         db = DatabaseManager()
         # Recuperiamo tutto il contesto in una sola chiamata ottimizzata
-        context = db.get_trading_context(CURRENCY, tf_config)
+        context = db.get_trading_context_traning(CURRENCY, tf_config, timeD, tf_config_forecast, "1d",1)
         db.close_connection()
     except Exception as e:
         print(f"[ERROR] Database fallito: {e}")
@@ -57,8 +58,7 @@ def run_brain_cycle(pair: dict):
         candles_db_data=context['candles'],
         open_order=context['order'],
         forecast_db_data=context['forecast'],
-        pair_limits=pair.get('pair_limits'),
-        wallet_balance=context['wallet_balance']
+        pair_limits=pair.get('pair_limits')
     )
 
     # Nota tecnica: Vectorizer.py calcola dinamicamente le dimensioni.

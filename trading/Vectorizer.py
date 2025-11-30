@@ -61,9 +61,8 @@ class DataVectorizer:
             (len(self.cfg.time_columns_order) * 4)
         )
 
-        # Order Dim + 1 (Flag Order Exists) + 3 (Leverage Features)
-        self.static_total_dim = self.order_dim + 1 + 3
-
+        # Order Dim + 1 (Flag Order Exists) + 3 (Leverage Features) +1 per bilancio wallet
+        self.static_total_dim = self.order_dim + 1 + 3 + 1
     # --- Utilities di Conversione ---
 
     def _safe_float(self, val: Any, default: float = 0.0) -> float:
@@ -133,7 +132,8 @@ class DataVectorizer:
                   candles_db_data: Dict[str, List[Dict[str, Any]]],
                   open_order: Optional[Dict[str, Any]],
                   forecast_db_data: List[Dict[str, Any]],
-                  pair_limits: Optional[Dict[str, Any]] = None) -> Dict[str, torch.Tensor]: # <--- NUOVO PARAMETRO
+                  pair_limits: Optional[Dict[str, Any]] = None,
+                  wallet_balance=0.0) -> Dict[str, torch.Tensor]: # <--- NUOVO PARAMETRO
 
         output = {}
 
@@ -202,7 +202,7 @@ class DataVectorizer:
             order_vec.append(0.0)
 
 
-                # [MaxLevBuy, MaxLevSell, CanLev(1/0)]
+        # [MaxLevBuy, MaxLevSell, CanLev(1/0)]
         lev_feats = [1.0, 1.0, 0.0]
 
         if pair_limits:
@@ -214,7 +214,10 @@ class DataVectorizer:
 
             lev_feats = [lev_buy_max / 10.0, lev_sell_max / 10.0, can_lev]
 
-        final_static = order_vec + lev_feats
+        # Normalizziamo il bilancio del wallet (log10)
+        balance_norm = math.log10(wallet_balance + 1.0)
+
+        final_static = order_vec + lev_feats + [balance_norm]
         output["static"] = torch.tensor(final_static, dtype=torch.float32)
 
 

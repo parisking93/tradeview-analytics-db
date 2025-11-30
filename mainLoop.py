@@ -14,7 +14,7 @@ LEVERAGE_ONLY = True
 TIMEFRAME_CONFIG = {
     "1d":  "5d",
     "4h":  "5d",
-    "1h":  "1d",
+    "1h":  "5d",
     "15m": "1d",
     "5m":  "1d",
     "1m":  "1d",

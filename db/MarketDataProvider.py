@@ -218,6 +218,7 @@ class MarketDataProvider:
             try:
                 yf_interval = self._normalize_interval_yahoo(interval)
                 if yf_interval:
+                    print(f"[INFO] Recupero dati Yahoo Finance per {pair} ({yf_ticker}) intervallo {yf_interval}... periodo: {range_period}")
                     df = yf.download(tickers=yf_ticker, period=range_period, interval=yf_interval, auto_adjust=True, progress=False, multi_level_index=False)
                     if not df.empty:
                         data = df
