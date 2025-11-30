@@ -58,7 +58,8 @@ def run_brain_cycle(pair: dict):
         candles_db_data=context['candles'],
         open_order=context['order'],
         forecast_db_data=context['forecast'],
-        pair_limits=pair.get('pair_limits')
+        pair_limits=pair.get('pair_limits'),
+        wallet_balance=context['wallet_balance']
     )
 
     # Nota tecnica: Vectorizer.py calcola dinamicamente le dimensioni.

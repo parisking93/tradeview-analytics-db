@@ -19,9 +19,11 @@ def train_loop():
     TF_CONFIG = {"1d": 30, "4h": 50, "1h": 100}
 
     # Quanto guardare nel futuro per decidere se era un buon trade?
-    LOOKAHEAD_STEPS = 48 # 48 ore (se usiamo candele 1h)
+    LOOKAHEAD_STEPS = 24 # 48 ore (se usiamo candele 1h)
 
-    EPOCHS = 1000 # Quanti esempi casuali mostrare al modello
+    # EPOCHS = 1000 # Quanti esempi casuali mostrare al modello
+    EPOCHS = 60 # Quanti esempi casuali mostrare al modello
+
 
     # --- SETUP ---
     db = DatabaseManager()
@@ -132,7 +134,7 @@ def train_loop():
                 print(f"Epoch {i}/{EPOCHS} | Loss: {loss:.4f} (Avg: {moving_avg_loss:.4f}) | Target: {side_str} vs Pred: {pred_str}")
 
     # Fine Training
-    trainer.save_checkpoint("trm_model_v1.pth")
+    trainer.save_checkpoint("trm_model_v2.pth")
     db.close_connection()
 
 if __name__ == "__main__":

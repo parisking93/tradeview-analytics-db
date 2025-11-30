@@ -214,7 +214,7 @@ class MarketDataProvider:
         data = pd.DataFrame()
 
         # Tentativo 1: Yahoo Finance
-        if yf_ticker:
+        if yf_ticker and interval.lower() == '1d':
             try:
                 yf_interval = self._normalize_interval_yahoo(interval)
                 if yf_interval:

@@ -79,7 +79,7 @@ def run_brain_cycle(pair: dict):
     )
 
     # !IMPORTANTE!: Qui dovresti caricare i pesi addestrati.
-    # model.load_state_dict(torch.load("path_to_weights.pth"))
+    model.load_state_dict(torch.load("trm_model_v1.pth"))
     # Per ora usiamo pesi casuali inizializzati, quindi le decisioni saranno randomiche.
     model.eval()
 
