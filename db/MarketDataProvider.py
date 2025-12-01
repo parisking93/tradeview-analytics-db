@@ -1,5 +1,7 @@
 # --- START OF FILE MarketDataProvider.py ---
 
+import asyncio
+import json
 import os
 import time
 import datetime
@@ -9,6 +11,12 @@ import yfinance as yf
 import krakenex
 from typing import List, Dict, Any, Optional
 from dotenv import load_dotenv
+
+# Tentiamo l'import, ma non rendiamo il modulo inutilizzabile se websockets non è installato.
+try:
+    import websockets  # type: ignore
+except ImportError:  # pragma: no cover - dipendenza opzionale
+    websockets = None
 
 class MarketDataProvider:
     def __init__(self, kraken_map: Dict[str, str] = None, yahoo_map: Dict[str, str] = None):
@@ -478,6 +486,92 @@ class MarketDataProvider:
                 seen_ids.add(k_id)
             except Exception: continue
         return all_pairs
+
+    # ==========================================================================================
+    # BINANCE WS (TRADES + DEPTH10) PER INSERIMENTO SU DB
+    # ==========================================================================================
+    async def stream_binance_market(self, pair: str, max_ticks: int = 50, depth_levels: int = 10) -> Dict[str, Any]:
+        """
+        Sottoscrive il WebSocket pubblico Binance (trade + depth10@100ms) per una singola coppia.
+        Ritorna una struttura pronta per l'inserimento a DB con:
+          - ticks: lista di trade normalizzati
+          - orderbook: snapshot depth (top N livelli)
+
+        NOTE:
+          - Richiede la libreria 'websockets' (pip install websockets)
+          - Il book restituito è l'ultimo update ricevuto durante la sessione
+          - Non fa persistence: pensato per essere richiamato dal collector che poi salva su DB
+        """
+        if websockets is None:
+            raise ImportError("La libreria 'websockets' non è installata. Esegui: pip install websockets")
+
+        symbol = pair.replace("/", "").lower()  # es. ETHEUR -> etheur
+        stream = f"{symbol}@trade/{symbol}@depth{depth_levels}@100ms"
+        url = f"wss://stream.binance.com:9443/stream?streams={stream}"
+
+        ticks: List[Dict[str, Any]] = []
+        last_orderbook: Optional[Dict[str, Any]] = None
+
+        # Per evitare loop infiniti, interrompiamo dopo max_ticks trades raccolti
+        async with websockets.connect(url, ping_interval=20, close_timeout=5) as ws:
+            while len(ticks) < max_ticks:
+                raw = await ws.recv()
+                message = json.loads(raw)
+                stream_name = message.get("stream", "")
+                payload = message.get("data", {})
+
+                if stream_name.endswith("@trade"):
+                    # Trade event
+                    trade_ts = datetime.datetime.utcfromtimestamp(payload.get("E", 0) / 1000).isoformat()
+                    ticks.append({
+                        "pair": pair,
+                        "timestamp": trade_ts,
+                        "price": float(payload.get("p", 0)),
+                        "size": float(payload.get("q", 0)),
+                        "side": "SELL" if payload.get("m") else "BUY",
+                        "trade_id": payload.get("t"),
+                        "exchange": "binance"
+                    })
+                elif "@depth" in stream_name:
+                    # Depth update (solo top N livelli)
+                    depth_ts = datetime.datetime.utcfromtimestamp(payload.get("E", 0) / 1000).isoformat()
+                    bids = payload.get("b", [])[:depth_levels]
+                    asks = payload.get("a", [])[:depth_levels]
+
+                    orderbook_rows: List[Dict[str, Any]] = []
+                    for idx, b in enumerate(bids):
+                        orderbook_rows.append({
+                            "pair": pair,
+                            "timestamp": depth_ts,
+                            "side": "BID",
+                            "price": float(b[0]),
+                            "size": float(b[1]),
+                            "depth_rank": idx + 1,
+                            "exchange": "binance"
+                        })
+                    for idx, a in enumerate(asks):
+                        orderbook_rows.append({
+                            "pair": pair,
+                            "timestamp": depth_ts,
+                            "side": "ASK",
+                            "price": float(a[0]),
+                            "size": float(a[1]),
+                            "depth_rank": idx + 1,
+                            "exchange": "binance"
+                        })
+
+                    last_orderbook = {
+                        "pair": pair,
+                        "timestamp": depth_ts,
+                        "exchange": "binance",
+                        "levels": orderbook_rows
+                    }
+
+        return {
+            "pair": pair,
+            "ticks": ticks,
+            "orderbook": last_orderbook
+        }
 
 if __name__ == "__main__":
     provider = MarketDataProvider()

@@ -111,19 +111,19 @@ def main_loop():
     last_15m_run = None
     last_1h_block_run = None
     counter = 0
-    while counter < 2:  # Cambiato per testare; metti while True: per esecuzione infinita
+    while True:  # Cambiato per testare; metti while True: per esecuzione infinita
         counter += 1
         now = datetime.now()
 
         # # Job ogni 5 minuti
-        # if last_5m_run is None or (now - last_5m_run) >= timedelta(minutes=5):
-        #     job_5m(pairs)
-        #     last_5m_run = now
+        if last_5m_run is None or (now - last_5m_run) >= timedelta(minutes=5):
+            job_5m(pairs)
+            last_5m_run = now
 
         # # Job ogni 15 minuti
-        # if last_15m_run is None or (now - last_15m_run) >= timedelta(minutes=15):
-        #     job_15m(pairs)
-        #     last_15m_run = now
+        if last_15m_run is None or (now - last_15m_run) >= timedelta(minutes=15):
+            job_15m(pairs)
+            last_15m_run = now
 
         # Job “blocco grosso” ogni 60 minuti (opzionale)
         if last_1h_block_run is None or (now - last_1h_block_run) >= timedelta(hours=1):

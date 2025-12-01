@@ -116,8 +116,8 @@ def main5():
     forecast = TimeSfmForecaster()
     db = DatabaseManager()
     all_pairs_eur = market_prov.getAllPairs(quote_filter="EUR", leverage_only=True)
-    timeD = "2025-11-29 12:00:00"
-    finalD = "2025-11-30 12:00:00"
+    timeD = "2025-11-29 22:00:00"
+    finalD = "2025-11-30 19:00:00"
     timeframes = {
         "1d": timeD,
         "4h": timeD,
@@ -131,19 +131,19 @@ def main5():
     while offset == True:
         for p in all_pairs_eur:
             if offset1d == True:
-                data_1d = db.get_candles_before_date('currency', "1d", p['base'], timeframes["1d"])
+                data_1d = db.get_candles_before_date('currency', "1d", p['base'], timeframes["1d"],None)
                 res = forecast.predict_candles(data_1d, "1d", 2, p)
                 db.insert_currency_data(res, p,"forecast")
             if offset4h == True:
-                data_4h =db.get_candles_before_date('currency', "4h", p['base'], timeframes["4h"])
+                data_4h =db.get_candles_before_date('currency', "4h", p['base'], timeframes["4h"],None)
                 res1 = forecast.predict_candles(data_4h, "4h", 3, p)
                 db.insert_currency_data(res1, p,"forecast")
             if offset1h == True:
-                data_1h =db.get_candles_before_date('currency', "1h", p['base'], timeframes["1h"])
+                data_1h =db.get_candles_before_date('currency', "1h", p['base'], timeframes["1h"], None)
                 res5 = forecast.predict_candles(data_1h, "1h", 4, p)
                 db.insert_currency_data(res5, p,"forecast")
             if offset15m == True:
-                data_15m = db.get_candles_before_date('currency', "15m", p['base'], timeframes["15m"])
+                data_15m = db.get_candles_before_date('currency', "15m", p['base'], timeframes["15m"], None)
                 res2 = forecast.predict_candles(data_15m, "15m", 6, p)
                 db.insert_currency_data(res2, p,"forecast")
             # if offset5m == True:
@@ -182,6 +182,6 @@ def main5():
 if __name__ == "__main__":
     # main2()
     # main3()
-    # main()
+    main()
     # main4()
-    main5()
+    # main5()
