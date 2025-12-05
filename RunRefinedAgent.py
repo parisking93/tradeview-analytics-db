@@ -68,7 +68,7 @@ def run_brain_cycle(pair: dict):
 
     print(f"   Input Dimension Candle: {input_dim_candle}")
     print(f"   Input Dimension Static: {static_dim}")
-
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     # C. INIZIALIZZAZIONE MODELLO (Il "Cervello")
     print("--- 3. CARICAMENTO MODELLO ---")
     model = MultiTimeframeTRM(
@@ -76,10 +76,10 @@ def run_brain_cycle(pair: dict):
         input_size_per_candle=input_dim_candle,
         static_size=static_dim,
         hidden_dim=256 # Deve essere lo stesso usato in fase di training
-    )
+    ).to(device)
 
     # !IMPORTANTE!: Qui dovresti caricare i pesi addestrati.
-    model.load_state_dict(torch.load("trm_model_best.pth"))
+    model.load_state_dict(torch.load("trm_model_best.pth", map_location=device))
     # Per ora usiamo pesi casuali inizializzati, quindi le decisioni saranno randomiche.
     model.eval()
 
