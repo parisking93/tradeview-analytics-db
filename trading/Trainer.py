@@ -34,7 +34,7 @@ class TradingTrainer:
         self.loss_ce_side = nn.CrossEntropyLoss(weight=self.weights_side)
 
         # 2. Loss per ORDER TYPE (2 classi: Limit, Market)
-        # Qui NON usiamo pesi (o standard), perché Limit e Market sono bilanciati
+        # Qui NON usiamo pesi (o standard), perche Limit e Market sono bilanciati
         self.loss_ce_type = nn.CrossEntropyLoss()
 
         self.loss_mse = nn.MSELoss()
@@ -47,7 +47,7 @@ class TradingTrainer:
         if not future_candles or len(future_candles) < 5:
             return None
 
-        # --- 1. CHECK POVERTÀ ---
+        # --- 1. CHECK POVERTA ---
         if wallet_balance < min_order_cost:
             return {
                 "side": torch.tensor([2], dtype=torch.long),
@@ -56,8 +56,8 @@ class TradingTrainer:
                 "tp_mult": torch.tensor([0.0], dtype=torch.float32).view(-1, 1),
                 "sl_mult": torch.tensor([0.0], dtype=torch.float32).view(-1, 1),
                 "ordertype": torch.tensor([0], dtype=torch.long),
-                "leverage": torch.tensor([0.0], dtype=torch.float32).view(-1, 1),
-                "halt_prob": torch.tensor([1.0], dtype=torch.float32).view(-1, 1)
+                "leverage": torch.tensor([1.0], dtype=torch.float32).view(-1, 1),  # ancora a 1x anche se flat
+                "halt_prob": torch.tensor([1.0], dtype=torch.float32).view(-1, 1)   # stop immediato se no-budget
             }
 
         # --- 2. ANALISI MERCATO ---
@@ -80,7 +80,8 @@ class TradingTrainer:
         target_tp_mult = 0.0
         target_sl_mult = 0.0
         target_ordertype = 0
-        target_leverage = 0.0
+        target_leverage = 1.0  # ancora su 1x di default
+        target_halt = 1.0      # di default se HOLD restiamo in halt
 
         # --- LOGICA BUY ---
         sl_threshold_price = current_price * (1 - MAX_STOP_LOSS_TOLERANCE)
@@ -111,12 +112,14 @@ class TradingTrainer:
             raw_lev = RISK_PER_TRADE / pct_loss
             max_pair_lev = float(pair_limits.get('leverage_buy_max', 1.0)) if pair_limits else 1.0
             safe_lev = min(raw_lev, max_pair_lev, 5.0)
-            target_leverage = max(0.0, safe_lev - 1.0)
+            target_leverage = safe_lev  # scala allineata al decoder (1x,2x,...)
 
-            if (closes[0] - current_price)/current_price > 0.008:
+            # Piu facile far emergere MARKET: soglia ridotta
+            if (closes[0] - current_price)/current_price > 0.003:
                 target_ordertype = 1
             else:
                 target_ordertype = 0
+            target_halt = 0.0  # trade attivo -> non fermarti subito
 
         # --- LOGICA SELL ---
         elif max_down_pct > MIN_PROFIT_PCT:
@@ -135,7 +138,15 @@ class TradingTrainer:
             raw_lev = RISK_PER_TRADE / pct_loss
             max_pair_lev = float(pair_limits.get('leverage_sell_max', 1.0)) if pair_limits else 1.0
             safe_lev = min(raw_lev, max_pair_lev, 5.0)
-            target_leverage = max(0.0, safe_lev - 1.0)
+            target_leverage = safe_lev
+
+            # CORREZIONE: Logica Market/Limit per SELL
+            # Se la prossima candela chiude molto piu in basso (-0.3%), entra MARKET
+            if (current_price - closes[0]) / current_price > 0.003:
+                target_ordertype = 1 # MARKET
+            else:
+                target_ordertype = 0 # LIMIT
+            target_halt = 0.0  # trade attivo -> non fermarti subito
 
         target_tp_mult = max(0.1, min(target_tp_mult, 5.0))
         target_sl_mult = max(0.1, min(target_sl_mult, 5.0))
@@ -148,7 +159,7 @@ class TradingTrainer:
             "sl_mult": torch.tensor([target_sl_mult], dtype=torch.float32).view(-1, 1),
             "ordertype": torch.tensor([target_ordertype], dtype=torch.long),
             "leverage": torch.tensor([target_leverage], dtype=torch.float32).view(-1, 1),
-            "halt_prob": torch.tensor([1.0], dtype=torch.float32).view(-1, 1)
+            "halt_prob": torch.tensor([target_halt], dtype=torch.float32).view(-1, 1)
         }
 
     def train_step(self, context, pair_limits, future_candles, current_step_idx):
@@ -202,8 +213,9 @@ class TradingTrainer:
         loss_tp  = self.loss_mse(preds['tp_mult'], t_tp) * is_active
         loss_sl  = self.loss_mse(preds['sl_mult'], t_sl) * is_active
         loss_px  = self.loss_mse(preds['price_offset'], t_px) * is_active
-        loss_lev = self.loss_mse(preds['leverage'], t_lev) * is_active
-        loss_type = self.loss_ce_type(preds['ordertype'], t_type) * is_active.view(-1)
+        # Leva e order type vengono sempre regressi/classificati per dare ancoraggio anche sugli HOLD
+        loss_lev = self.loss_mse(preds['leverage'], t_lev)
+        loss_type = self.loss_ce_type(preds['ordertype'], t_type)
         loss_halt = self.loss_bce(preds['halt_prob'], t_halt)
 
         total_loss = (
@@ -212,14 +224,14 @@ class TradingTrainer:
             0.5 * loss_tp +
             0.5 * loss_sl +
             0.3 * loss_lev +
-            0.2 * loss_type +
+            0.3 * loss_type +  # peso leggermente maggiore per ordertype
             0.1 * loss_px +
             0.2 * loss_halt
         )
 
         # --- GESTIONE GRADIENT ACCUMULATION ---
 
-        # Normalizziamo la loss (perché sommeremo i gradienti 32 volte)
+        # Normalizziamo la loss (perche sommeremo i gradienti 4 volte)
         loss_normalized = total_loss / self.accumulation_steps
         loss_normalized.backward() # Accumula il gradiente
 
