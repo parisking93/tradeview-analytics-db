@@ -2,3 +2,10 @@ pip install git+https://github.com/google-research/timesfm.git
 pip install torch numpy pandas scikit-learn einops huggingface_hub
 pip install git+https://github.com/amazon-science/chronos-forecasting.git
 servizi nella barra del menu ---> mySQL80---- > avvia
+
+
+$env:MIOPEN_DEBUG_CONV_IMPLICIT_GEMM = "0"
+$env:MIOPEN_DEBUG_CONV_GEMM = "1"
+$env:MIOPEN_FIND_MODE = "3"
+
+python -m pip install numpy pandas scikit-learn einops huggingface_hub tqdm timesfm krakenex yfinance finnhub-python mysql-connector-python python-dotenv websockets

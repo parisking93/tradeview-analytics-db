@@ -24,7 +24,7 @@ def run_brain_cycle(pair: dict):
     # Più alto è, più "stabile" è la decisione (simile al cervello umano che ci pensa su).
     THINKING_STEPS = 7
     MIN_STEPS = 2           # Minimo sindacale per stabilizzarsi
-    HALT_THRESHOLD = 0.75   # Se il modello è sicuro al 85% di fermarsi, si ferma
+    HALT_THRESHOLD = 0.95      # Abbassato per evitare stop troppo precoci
     # Configurazione Timeframe (Deve combaciare con Vectorizer e Modello)
     tf_config = {"1d": 30, "4h": 50, "1h": 100}
 
@@ -79,7 +79,7 @@ def run_brain_cycle(pair: dict):
     )
 
     # !IMPORTANTE!: Qui dovresti caricare i pesi addestrati.
-    model.load_state_dict(torch.load("trm_model_best_v1.pth"))
+    model.load_state_dict(torch.load("trm_model_best.pth"))
     # Per ora usiamo pesi casuali inizializzati, quindi le decisioni saranno randomiche.
     model.eval()
 

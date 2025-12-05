@@ -2,7 +2,7 @@ import sys
 import os
 import random
 from datetime import datetime, timedelta
-
+import torch
 # Path Setup
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
@@ -20,7 +20,7 @@ def train_loop():
     # ORA EPOCHS SIGNIFICA: "Quante volte voglio passare su TUTTE le coppie?"
     # Se hai 50 coppie e metti 100 Epoche, farai 5.000 training step totali.
     # EPOCHS = 100
-    EPOCHS = 15
+    EPOCHS = 50
 
 
     # --- SETUP ---
@@ -52,7 +52,7 @@ def train_loop():
 
     # --- TRAINING LOOP ANNIDATO ---
     moving_avg_loss = 0.0
-    best_loss = float('inf') # La miglior loss mai vista (inizia infinita)
+    best_loss = float(2.5) # La miglior loss mai vista (inizia infinita)
     tf_config_forecast = {"1d+1": 1, "1d+2": 1, "4h+1": 1, "4h+2": 1}
 
     global_step = 0 # Contatore totale passi
@@ -98,7 +98,13 @@ def train_loop():
                 forecast_forward_tf="1d",
                 forecast_limit=1
             )
+            # ### NUOVO: SPOSTA IL MODELLO SU GPU SE DISPONIBILE
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            # print(f"--- DEVICE SELEZIONATO: {device} ---")
+            # if device.type == 'cuda':
+            #     print(f"--- Scheda Video: {torch.cuda.get_device_name(0)} ---")
 
+            model.to(device)
             if not context['candles'].get('1h') or len(context['candles']['1h']) < TF_CONFIG['1h']:
                 continue
 
