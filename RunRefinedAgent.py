@@ -24,7 +24,7 @@ def run_brain_cycle(pair: dict):
     # Più alto è, più "stabile" è la decisione (simile al cervello umano che ci pensa su).
     THINKING_STEPS = 7
     MIN_STEPS = 2           # Minimo sindacale per stabilizzarsi
-    HALT_THRESHOLD = 0.95      # Abbassato per evitare stop troppo precoci
+    HALT_THRESHOLD = 0.50      # Abbassato per evitare stop troppo precoci
     # Configurazione Timeframe (Deve combaciare con Vectorizer e Modello)
     tf_config = {"1d": 30, "4h": 50, "1h": 100}
 
