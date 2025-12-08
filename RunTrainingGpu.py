@@ -62,9 +62,9 @@ def train_loop():
     FORECAST_FORWARD_TF = "1d" # Quanto in avanti guardiamo per selezionare il forecast
 
     LOOKAHEAD_STEPS = 24  # 24 ore nel futuro per l'Oracolo (Target)
-    EPOCHS = 300
-    CACHE_LIMIT = 15000    # Candele storiche
-    FORECAST_CACHE_LIMIT = 5000 # Forecast limit
+    EPOCHS = 400
+    CACHE_LIMIT = 200000    # Candele storiche
+    FORECAST_CACHE_LIMIT = 40000 # Forecast limit
 
     # --- SETUP ---
     print("--- INIZIALIZZAZIONE DB E PROVIDER ---")
@@ -140,7 +140,7 @@ def train_loop():
         tf_configs=TF_CONFIG,
         input_size_per_candle=vectorizer.candle_dim,
         static_size=vectorizer.static_total_dim,
-        hidden_dim=256
+        hidden_dim=512
     )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

@@ -315,6 +315,33 @@ class KrakenOrderRunner:
         except Exception:
             return None
 
+    def cancel_order(self, order: dict) -> bool:
+        """
+        Cancella un ordine su Kraken se possibile.
+        Restituisce True se l'API conferma la cancellazione.
+        """
+        if not order:
+            return False
+        txid = None
+        for key in ("decision_id", "order_id", "txid", "id"):
+            val = order.get(key) if isinstance(order, dict) else None
+            if val:
+                txid = val
+                break
+        if not txid:
+            return False
+        try:
+            k = self.api or self._get_api_from_env()
+            self.api = k
+            resp = k.query_private("CancelOrder", {"txid": str(txid)})
+            errors = resp.get("error") if isinstance(resp, dict) else None
+            if errors is None:
+                return True
+            return len(errors) == 0
+        except Exception as e:
+            print(f"[WARN] CancelOrder fallita per {txid}: {e}")
+            return False
+
     # ----------------- esecuzione -----------------
     def execute_bodies(self, bodies: list[dict], *, timeout: float = 0.5) -> list[dict]:
         """

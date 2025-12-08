@@ -128,6 +128,15 @@ class MultiTimeframeTRM(nn.Module):
                 batch_first=True
             )
 
+
+        # TO BE
+        # self.timeframe_encoders[tf] = nn.GRU(
+        #     input_size=input_size_per_candle,
+        #     num_layers=2,
+        #     hidden_size=256,
+        #     batch_first=True,
+        # dropout=0.1,
+        # )
         # 2. Encoder per il Forecast (Sequenza Futura)
         # Usa la stessa input size delle candele perché la tabella è uguale
         self.forecast_encoder = nn.GRU(
@@ -135,7 +144,14 @@ class MultiTimeframeTRM(nn.Module):
             hidden_size=64,
             batch_first=True
         )
-
+        # TO BE
+        # self.forecast_encoder = nn.GRU(
+        #     input_size=input_size_per_candle,
+        #     num_layers=2,
+        #     hidden_size=128,
+        #     batch_first=True
+            # dropout=0.1,
+        # )
         # Dimensione totale contesto:
         # (64 * numero TF storici) + (64 * forecast) + dimensione statico (ordine)
         total_context_size = (64 * len(self.tf_names)) + 64 + static_size

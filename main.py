@@ -116,8 +116,8 @@ def main5():
     forecast = TimeSfmForecaster()
     db = DatabaseManager()
     all_pairs_eur = market_prov.getAllPairs(quote_filter="EUR", leverage_only=True)
-    timeD = "2025-12-04 11:45:00"
-    finalD = "2025-12-08 8:00:00"
+    timeD = "2025-12-06 11:45:00"
+    finalD = "2025-12-08 15:00:00"
     timeframes = {
         "1d": timeD,
         "4h": timeD,

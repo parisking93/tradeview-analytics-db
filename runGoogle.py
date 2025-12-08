@@ -20,8 +20,8 @@ from trading.KrakenOrderRunner import KrakenOrderRunner
 # ==============================================================================
 
 # File dei pesi
-MODEL_PATH_HIGH = "trm_model_best.pth"
-MODEL_PATH_LOW  = "trm_model_best_new_last.pth"
+MODEL_PATH_HIGH = "trm_model_best_512_high.pth"
+MODEL_PATH_LOW  = "trm_model_best_512_low.pth"
 
 # Configurazione Timeframe
 TF_CONFIG_HIGH = {"1d": 30, "4h": 50, "1h": 100}
@@ -33,6 +33,9 @@ MIN_STEPS = 2
 HALT_THRESHOLD = 0.70
 
 STATE_FILE = "dual_brain_state.json"
+MODE = os.getenv("TRADING_MODE", "TEST").upper()
+GLOBAL_WALLET_BALANCE = None
+OPEN_ORDER_ATTEMPTS = {}
 
 # ==============================================================================
 # GESTIONE STATO E PERSISTENZA
@@ -143,7 +146,7 @@ class BrainInstance:
                 tf_configs=self.tf_config,
                 input_size_per_candle=input_dim_candle,
                 static_size=static_dim,
-                hidden_dim=256
+                hidden_dim=512
             ).to(self.device)
 
             if os.path.exists(self.model_path):
@@ -165,7 +168,7 @@ class BrainInstance:
                 open_order=context_data['order'],
                 forecast_db_data=context_data['forecast'],
                 pair_limits=pair_data.get('pair_limits'),
-                wallet_balance=context_data['wallet_balance']
+                wallet_balance=_ensure_global_wallet_balance(context_data)
             )
         except Exception as e:
             print(f"{self.print_prefix} [ERROR] Vectorization failed for {pair_data['pair']}: {e}")
@@ -204,13 +207,211 @@ class BrainInstance:
 # LOGICA DI ESECUZIONE
 # ==============================================================================
 
-def execute_order(action, source="LowTF"):
-    decision = action['decision']
+def _safe_float(value, default=0.0):
+    try:
+        return float(value)
+    except Exception:
+        try:
+            return float(default)
+        except Exception:
+            return 0.0
 
+
+def _extract_decision_id_from_results(results):
+    if not results:
+        return None
+    for res in results:
+        if not isinstance(res, dict):
+            continue
+        echo = res.get("_echo") or {}
+        if echo.get("_decision_id"):
+            return echo.get("_decision_id")
+        if echo.get("order_id"):
+            return echo.get("order_id")
+    return None
+
+def _ensure_global_wallet_balance(context_data):
+    global GLOBAL_WALLET_BALANCE
+    if GLOBAL_WALLET_BALANCE is None:
+        GLOBAL_WALLET_BALANCE = _safe_float((context_data or {}).get("wallet_balance"), default=0.0)
+    return GLOBAL_WALLET_BALANCE
+
+def _update_wallet_on_open(cost):
+    global GLOBAL_WALLET_BALANCE
+    if cost is None: return
+    GLOBAL_WALLET_BALANCE = _safe_float(GLOBAL_WALLET_BALANCE, default=0.0)
+    GLOBAL_WALLET_BALANCE -= _safe_float(cost, default=0.0)
+
+def _update_wallet_on_close(amount):
+    global GLOBAL_WALLET_BALANCE
+    if amount is None: return
+    GLOBAL_WALLET_BALANCE = _safe_float(GLOBAL_WALLET_BALANCE, default=0.0)
+    GLOBAL_WALLET_BALANCE += _safe_float(amount, default=0.0)
+
+def _update_wallet_on_cancel(amount):
+    global GLOBAL_WALLET_BALANCE
+    if amount is None: return
+    GLOBAL_WALLET_BALANCE = _safe_float(GLOBAL_WALLET_BALANCE, default=0.0)
+    GLOBAL_WALLET_BALANCE += _safe_float(amount, default=0.0)
+
+def _increment_blocked_attempt(pair):
+    OPEN_ORDER_ATTEMPTS[pair] = OPEN_ORDER_ATTEMPTS.get(pair, 0) + 1
+    return OPEN_ORDER_ATTEMPTS[pair]
+
+def _reset_blocked_attempt(pair):
+    if pair in OPEN_ORDER_ATTEMPTS:
+        del OPEN_ORDER_ATTEMPTS[pair]
+
+def persist_order_to_db(action, context=None, pair_info=None, runner_results=None, mode=MODE):
+    """
+    Registra l'azione nella tabella orders. Se esiste un ordine aperto nel contesto,
+    aggiorna quel record (price_out/pnl/status). Altrimenti inserisce un nuovo record OPEN.
+    """
+    global GLOBAL_WALLET_BALANCE
+    existing_order = (context or {}).get("order")
+    action_body = action.get("actionKraken", {}) if isinstance(action, dict) else {}
+    _ensure_global_wallet_balance(context or {})
+
+    pair_name = action.get("pair") if isinstance(action, dict) else action_body.get("pair")
+    base = (pair_info or {}).get("base") or (existing_order or {}).get("base")
+    quote = (pair_info or {}).get("quote") or (existing_order or {}).get("quote")
+    kr_pair = (pair_info or {}).get("kr_pair") or (existing_order or {}).get("kr_pair")
+
+    if (not base or not quote) and pair_name and "/" in pair_name:
+        parts = pair_name.split("/", 1)
+        base = base or parts[0]
+        quote = quote or parts[1]
+
+    qty = _safe_float(action.get("final_qty") if isinstance(action, dict) else None,
+                      default=(action_body.get("quantita") or 0.0))
+    limit_price = _safe_float(action.get("limit_price") if isinstance(action, dict) else None,
+                              default=action_body.get("prezzo") or 0.0)
+    take_profit = _safe_float(action.get("take_profit") if isinstance(action, dict) else None,
+                              default=action_body.get("take_profit") or 0.0)
+    stop_loss = _safe_float(action.get("stop_loss") if isinstance(action, dict) else None,
+                            default=action_body.get("stop_loss") or 0.0)
+    lev_value = _safe_float(action.get("leverage") if isinstance(action, dict) else None,
+                            default=action_body.get("leverage") or 1.0)
+    has_leverage = lev_value > 1
+
+    decision_str = (action.get("decision") if isinstance(action, dict) else None) or ""
+    subtype = "buy" if decision_str.upper() == "BUY" else "sell" if decision_str.upper() == "SELL" else "hold"
+    order_type = "position_margin" if has_leverage else "position"
+    order_exec_type = (
+        (action.get("ordertype") if isinstance(action, dict) else None)
+        or (action_body.get("ordertype") if isinstance(action_body, dict) else None)
+        or "LIMIT"
+    )
+    order_exec_type = str(order_exec_type).upper()
+    now_dt = datetime.now()
+    record_date = now_dt.date()
+    mode_value = str(mode or MODE or "TEST").upper()
+
+    wallet_id = (existing_order or {}).get("wallet_id") or 4
+    decision_id = (existing_order or {}).get("decision_id") or _extract_decision_id_from_results(runner_results)
+
+    db = None
+    try:
+        db = DatabaseManager()
+
+        if existing_order and existing_order.get("status", "").upper() == "OPEN" and existing_order.get("id"):
+            subtype_use = (existing_order.get("subtype") or subtype or "buy").lower()
+            entry_price = _safe_float(existing_order.get("price_entry"), default=limit_price)
+            qty_use = _safe_float(existing_order.get("qty"), default=qty)
+            price_out = limit_price if limit_price > 0 else _safe_float(existing_order.get("price"), default=entry_price)
+            existing_order_type = (existing_order.get("orderType") or "").upper() or "MARKET"
+            if existing_order_type == "LIMIT":
+                pnl = 0.0
+            else:
+                pnl = (price_out - entry_price) * qty_use if subtype_use == "buy" else (entry_price - price_out) * qty_use
+            value_eur = price_out * qty_use
+            lev_final = existing_order.get("lev") or lev_value or 1.0
+
+            update_sql = """
+                UPDATE orders
+                SET price_out = %s,
+                    price = %s,
+                    value_eur = %s,
+                    pnl = %s,
+                    status = 'CLOSED',
+                    record_date = %s,
+                    lev = %s
+                WHERE id = %s
+            """
+            db.cursor.execute(update_sql, (
+                price_out,
+                price_out,
+                value_eur,
+                pnl,
+                record_date,
+                lev_final,
+                existing_order["id"]
+            ))
+            db.conn.commit()
+            cash_back = (entry_price * qty_use) + pnl
+            _update_wallet_on_close(cash_back)
+            return existing_order["id"]
+
+        price_entry = limit_price
+        price_avg = price_entry
+        price = price_entry
+        value_eur = qty * price
+        pnl = 0.0
+        lev_final = lev_value if lev_value > 0 else 1.0
+
+        insert_sql = """
+            INSERT INTO orders (
+                wallet_id, pair, kr_pair, base, quote, qty,
+                price_entry, price_avg, take_profit, stop_loss,
+                price, value_eur, pnl, type, subtype,
+                created_at, record_date, status, price_out, decision_id, lev,
+                mode, orderType
+            ) VALUES (
+                %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s,
+                %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s, %s,
+                %s, %s
+            )
+        """
+        db.cursor.execute(insert_sql, (
+            wallet_id, pair_name, kr_pair, base, quote, qty,
+            price_entry, price_avg, take_profit, stop_loss,
+            price, value_eur, pnl, order_type, subtype,
+            now_dt, record_date, "OPEN", None, decision_id, lev_final,
+            mode_value, order_exec_type
+        ))
+        db.conn.commit()
+        _update_wallet_on_open(value_eur)
+        return db.cursor.lastrowid
+    except Exception as e:
+        if db and db.conn:
+            db.conn.rollback()
+        print(f"[ERROR] Persistenza ordine fallita: {e}")
+        return None
+    finally:
+        if db:
+            db.close_connection()
+
+
+def execute_order(action, context=None, pair_info=None, source="LowTF"):
+    decision = action.get("decision") if isinstance(action, dict) else getattr(action, "decision", "")
+    action_body = action.get("actionKraken") if isinstance(action, dict) else getattr(action, "actionKraken", None)
+    if not action_body:
+        print("[WARN] Nessun action body disponibile per l'esecuzione.")
+        return
 
     runner = KrakenOrderRunner()
-    bodies = runner.build_bodies([action], validate=True, auto_brackets=False)
-    test = runner.execute_bodies(bodies, timeout=0.8)
+    bodies = runner.build_bodies([action_body], validate=True, auto_brackets=False)
+    execution_results = runner.execute_bodies(bodies, timeout=0.8)
+    has_success = any(not (res.get("error") or []) for res in execution_results) if execution_results else False
+    if has_success:
+        try:
+            persist_order_to_db(action, context=context, pair_info=pair_info, runner_results=execution_results, mode=MODE)
+        except Exception as e:
+            print(f"[WARN] Impossibile registrare l'ordine su DB: {e}")
+    else:
+        print("[WARN] Ordine non registrato nel DB per risposta di errore dall'exchange.")
     GREEN = "\033[92m"
     RED = "\033[91m"
     YELLOW = "\033[93m"
@@ -221,10 +422,15 @@ def execute_order(action, source="LowTF"):
     print(f"\n >>> {color}[EXECUTION - {source}] {decision} {action['pair']}{RESET}")
 
     if decision != "HOLD":
-        print(f"     Qty: {action['final_qty']:.6f} @ {action['limit_price']:.5f}")
-        print(f"     TP:  {action['take_profit']:.5f}")
-        print(f"     SL:  {action['stop_loss']:.5f}")
-        print(f"     Lev: {action['leverage']:.1f}x")
+        final_qty = action.get('final_qty') if isinstance(action, dict) else getattr(action, "final_qty", 0.0)
+        limit_price = action.get('limit_price') if isinstance(action, dict) else getattr(action, "limit_price", 0.0)
+        take_profit = action.get('take_profit') if isinstance(action, dict) else getattr(action, "take_profit", 0.0)
+        stop_loss = action.get('stop_loss') if isinstance(action, dict) else getattr(action, "stop_loss", 0.0)
+        leverage = action.get('leverage') if isinstance(action, dict) else getattr(action, "leverage", 0.0)
+        print(f"     Qty: {final_qty:.6f} @ {limit_price:.5f}")
+        print(f"     TP:  {take_profit:.5f}")
+        print(f"     SL:  {stop_loss:.5f}")
+        print(f"     Lev: {leverage:.1f}x")
     print(" <<<\n")
 
 def record_conflict_event(pair, high_side, low_side, counter):
@@ -243,10 +449,11 @@ def run_high_tf_job(brain: BrainInstance, state_mgr: StateManager, all_pairs):
         base_currency = pair['base']
 
         try:
-            context = db.get_trading_context(base_currency, TF_CONFIG_HIGH)
+            context = db.get_trading_context(base_currency, TF_CONFIG_HIGH, with_orders=True)
         except Exception as e:
             continue
 
+        _ensure_global_wallet_balance(context)
         if not context['candles'].get('1d'):
             continue
 
@@ -257,6 +464,8 @@ def run_high_tf_job(brain: BrainInstance, state_mgr: StateManager, all_pairs):
             if decision in ["BUY", "SELL"]:
                 print(f"[{datetime.now().strftime('%H:%M')}] HighTF {pair_name}: {decision}")
                 state_mgr.update_watchlist(pair_name, decision)
+            else:
+                print(f"[{datetime.now().strftime('%H:%M')}] HighTF {pair_name}: HOLD")
 
     db.close_connection()
     print("=== FINE JOB HIGH-TF ===\n")
@@ -289,6 +498,7 @@ def run_low_tf_job(brain: BrainInstance, state_mgr: StateManager, all_pairs):
         except Exception:
             continue
 
+        _ensure_global_wallet_balance(context)
         if not context['candles'].get('1h'): continue
 
         action = brain.think(pair, context)
@@ -297,6 +507,37 @@ def run_low_tf_job(brain: BrainInstance, state_mgr: StateManager, all_pairs):
         decision_low = action['decision']
         print(f"[{datetime.now().strftime('%H:%M')}] LowTF {pair_name}: {decision_low}")
 
+        open_order = context.get("order")
+        if open_order and (open_order.get("status", "").upper() == "OPEN"):
+            order_type_open = (open_order.get("orderType") or "").upper()
+            if decision_low != "HOLD":
+                if order_type_open == "LIMIT":
+                    cnt = _increment_blocked_attempt(pair_name)
+                    print(f"   [SKIP] {pair_name} ha gia un ordine LIMIT aperto. Tentativo {cnt}/3.")
+                    if cnt >= 3:
+                        runner_cancel = KrakenOrderRunner()
+                        cancel_ok = runner_cancel.cancel_order(open_order)
+                        if cancel_ok:
+                            try:
+                                db.updateOrder(open_order.get("id"), status="CLOSED", orderType="LIMIT")
+                            except Exception as e:
+                                print(f"[WARN] Aggiornamento DB dopo cancel fallito: {e}")
+                            restore_cost = _safe_float(open_order.get("value_eur"), default=0.0)
+                            if restore_cost == 0.0:
+                                restore_cost = _safe_float(open_order.get("price_entry"), default=0.0) * _safe_float(open_order.get("qty"), default=0.0)
+                            _update_wallet_on_cancel(restore_cost)
+                            _reset_blocked_attempt(pair_name)
+                        else:
+                            print(f"   [WARN] Cancellazione Kraken non riuscita per {pair_name}.")
+                else:
+                    print(f"   [SKIP] {pair_name} ha gia un ordine aperto in esecuzione.")
+                    _reset_blocked_attempt(pair_name)
+            else:
+                _reset_blocked_attempt(pair_name)
+            continue
+        else:
+            _reset_blocked_attempt(pair_name)
+
         if decision_low == "HOLD":
             continue
 
@@ -304,14 +545,14 @@ def run_low_tf_job(brain: BrainInstance, state_mgr: StateManager, all_pairs):
 
         if not high_info:
             print(f"   [WARN] {pair_name} non ha decisione HighTF recente. Fallback LowTF.")
-            execute_order(action, source="LowTF-Fallback")
+            execute_order(action, context=context, pair_info=pair, source="LowTF-Fallback")
             continue
 
         decision_high = high_info['last_high_decision']
 
         if decision_low == decision_high:
             print(f"   [MATCH] Coerenza confermata ({decision_low}).")
-            execute_order(action, source="LowTF-Confirmed")
+            execute_order(action, context=context, pair_info=pair, source="LowTF-Confirmed")
             state_mgr.reset_conflict(pair_name)
         else:
             cnt = state_mgr.increment_conflict(pair_name)
@@ -319,7 +560,7 @@ def run_low_tf_job(brain: BrainInstance, state_mgr: StateManager, all_pairs):
 
             if cnt > 3:
                 print(f"   >>> FORCE: Conflitto ripetuto {cnt} volte su {pair_name}. Vince LowTF.")
-                execute_order(action, source="LowTF-Forced")
+                execute_order(action, context=context, pair_info=pair, source="LowTF-Forced")
                 state_mgr.reset_conflict(pair_name)
             else:
                 print(f"   >>> BLOCCO: {pair_name} opposto a HighTF ({decision_high}). Attesa.")
@@ -355,8 +596,8 @@ def main_loop_dual_brain():
         # Job HighTF (Ogni 60 minuti)
         if last_high_run is None or (now - last_high_run) >= timedelta(hours=1):
             try:
-                run_high_tf_job(brain_high, state_mgr, all_pairs)
                 last_high_run = datetime.now()
+                run_high_tf_job(brain_high, state_mgr, all_pairs)
             except Exception as e:
                 print(f"[CRITICAL ERROR] HighTF Crash: {e}")
                 traceback.print_exc()
@@ -364,8 +605,8 @@ def main_loop_dual_brain():
         # Job LowTF (Ogni 5 minuti)
         if last_low_run is None or (now - last_low_run) >= timedelta(minutes=5):
             try:
-                run_low_tf_job(brain_low, state_mgr, all_pairs)
                 last_low_run = datetime.now()
+                run_low_tf_job(brain_low, state_mgr, all_pairs)
             except Exception as e:
                 print(f"[CRITICAL ERROR] LowTF Crash: {e}")
                 traceback.print_exc()

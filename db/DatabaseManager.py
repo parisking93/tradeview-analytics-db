@@ -174,6 +174,26 @@ class DatabaseManager:
         if self.conn: self.conn.close()
         print("--- Connessione Database Chiusa ---")
 
+    def updateOrder(self, order_id, **fields):
+        if not order_id or not fields: return False
+        set_parts = []
+        values = []
+        for k, v in fields.items():
+            if not k: continue
+            set_parts.append(f"{k} = %s")
+            values.append(v)
+        if not set_parts: return False
+        values.append(order_id)
+        query = f"UPDATE orders SET {', '.join(set_parts)} WHERE id = %s"
+        try:
+            self.cursor.execute(query, tuple(values))
+            self.conn.commit()
+            return True
+        except mysql.connector.Error as err:
+            print(f"Errore updateOrder: {err}")
+            self.conn.rollback()
+            return False
+
     def select_all(self, table_name: str, where_clause: str = "1"):
         safe_table = "".join(ch for ch in table_name if ch.isalnum() or ch == '_')
         if not safe_table: return []
@@ -261,12 +281,26 @@ class DatabaseManager:
     # ==============================================================================
     # BONIFICA ORDINE E UPDATE DB
     # ==============================================================================
-    def _sanitize_and_update_order(self, order, current_price):
+    def _sanitize_and_update_order(self, order, current_price, candles_dict):
         """
         Bonifica i campi NULL dell'ordine con dati fittizi ma realistici
         e aggiorna il record nel database.
         """
         changed = False
+
+        def _to_datetime(val):
+            if isinstance(val, datetime): return val
+            if not val: return None
+            for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S.%f"):
+                try:
+                    return datetime.strptime(str(val), fmt)
+                except Exception:
+                    continue
+            try:
+                return datetime.fromisoformat(str(val))
+            except Exception:
+                return None
+
         try:
             current_price = float(current_price)
             order_id = order.get('id')
@@ -319,13 +353,81 @@ class DatabaseManager:
             # --- 7. Aggiornamento Prezzo Corrente ---
             order['price'] = current_price
 
-            # --- 8. Calcolo PnL ---
-            if is_buy:
-                pnl = (current_price - price_entry) * qty
+            # ---7.9 Aggiornamento Candles e orderType (se necessario) ---
+            orderType = (order.get('orderType') or "MARKET").upper()
+            created_at_dt = _to_datetime(order.get('created_at'))
+            has_entered = False
+
+            if orderType == "LIMIT" and created_at_dt and candles_dict:
+                for _, candles in candles_dict.items():
+                    for candle in candles or []:
+                        c_ts = _to_datetime(candle.get('timestamp'))
+                        if not c_ts or c_ts <= created_at_dt:
+                            continue
+                        try:
+                            c_low = float(candle.get('low'))
+                            c_high = float(candle.get('high'))
+                        except (TypeError, ValueError):
+                            continue
+
+                        if (is_buy and c_low <= price_entry) or (not is_buy and c_high >= price_entry):
+                            has_entered = True
+                            break
+                    if has_entered:
+                        break
+
+            if has_entered:
+                if orderType != "MARKET":
+                    changed = True
+                orderType = "MARKET"
+
+            order['orderType'] = orderType
+
+            # --- 8. Stop Loss Check ---
+            stop_hit = False
+            try:
+                sl_val = float(order.get('stop_loss')) if order.get('stop_loss') is not None else None
+            except (TypeError, ValueError):
+                sl_val = None
+            if sl_val is not None:
+                if (is_buy and current_price <= sl_val) or ((not is_buy) and current_price >= sl_val):
+                    stop_hit = True
+                    order['status'] = 'CLOSED'
+                    order['price_out'] = current_price
+                    order['value_eur'] = current_price * qty
+
+            # --- 9. Calcolo PnL ---
+            lev_mult = float(order.get('lev') or 1)
+            if orderType == "LIMIT" and not stop_hit:
+                pnl = 0.0
+            elif is_buy:
+                pnl = (current_price - price_entry) * (qty * lev_mult)
             else:
-                pnl = (price_entry - current_price) * qty
+                pnl = (price_entry - current_price) * (qty * lev_mult)
 
             order['pnl'] = pnl
+
+            if stop_hit:
+                try:
+                    self.updateOrder(
+                        order_id,
+                        price_entry=order['price_entry'],
+                        qty=order['qty'],
+                        take_profit=order['take_profit'],
+                        stop_loss=order['stop_loss'],
+                        price_avg=order['price_avg'],
+                        price=current_price,
+                        pnl=order['pnl'],
+                        subtype=order['subtype'],
+                        orderType=order['orderType'],
+                        status=order.get('status'),
+                        price_out=order.get('price_out'),
+                        value_eur=order.get('value_eur'),
+                        record_date=datetime.now().date()
+                    )
+                except Exception as e:
+                    print(f"[ERR] Errore update stop_loss ordine {order_id}: {e}")
+                return None
 
             # --- ESECUZIONE UPDATE ---
             query_update = """
@@ -338,7 +440,8 @@ class DatabaseManager:
                     price_avg = %s,
                     price = %s,
                     pnl = %s,
-                    subtype = %s
+                    subtype = %s,
+                    orderType = %s
                 WHERE id = %s
             """
             self.cursor.execute(query_update, (
@@ -350,6 +453,7 @@ class DatabaseManager:
                 order['price'],
                 order['pnl'],
                 order['subtype'],
+                order['orderType'],
                 order_id
             ))
             self.conn.commit()
@@ -366,7 +470,7 @@ class DatabaseManager:
     # ==============================================================================
     # METODO GET_TRADING_CONTEXT (AGGIORNATO PROFESSIONALE)
     # ==============================================================================
-    def get_trading_context(self, base_currency: str, history_config: dict, with_orders: bool = False,test_mode: bool = False):
+    def get_trading_context(self, base_currency: str, history_config: dict, with_orders: bool = False,test_mode: bool = True):
         """
         Recupera il contesto di trading.
         Logica per il Current Price: Dinamica e basata sul Timestamp.
@@ -414,14 +518,15 @@ class DatabaseManager:
                 print(f"Error fetching candles {tf}: {err}")
 
         # 2. Recupero Ordine Aperto e Bonifica
+        mode = "LIVE" if not test_mode else "TEST"
         query_order = """
             SELECT * FROM orders
-            WHERE base = %s AND status = 'OPEN'
+            WHERE base = %s AND status = 'OPEN' AND mode = %s
             ORDER BY created_at DESC LIMIT 1
         """
         try:
             if with_orders:
-                self.cursor.execute(query_order, (base_currency,))
+                self.cursor.execute(query_order, (base_currency, mode))
                 res = self.cursor.fetchone()
                 if res:
                     columns = [col[0] for col in self.cursor.description]
@@ -429,7 +534,7 @@ class DatabaseManager:
 
                     # Bonifica solo se abbiamo un prezzo di riferimento valido
                     if current_price > 0:
-                        sanitized_order = self._sanitize_and_update_order(raw_order, current_price)
+                        sanitized_order = self._sanitize_and_update_order(raw_order, current_price, context_data["candles"])
                         context_data["order"] = sanitized_order
                     else:
                         context_data["order"] = raw_order
