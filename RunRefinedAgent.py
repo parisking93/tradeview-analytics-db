@@ -15,18 +15,18 @@ from trading.Decoder import ActionDecoder
 # ==============================================================================
 # 2. PROCESSO DI TRADING "METICOLOSO"
 # ==============================================================================
-def run_brain_cycle(pair: dict):
+def run_brain_cycle(pair: dict, tf_config: dict = {"1h":30, "15m":50, "5m":100}):
     # --- CONFIGURAZIONE ---
     CURRENCY = pair.get('base')
     PAIR = pair.get('pair')
 
     # Quanti passi di "riflessione" deve fare il modello prima di decidere?
     # Più alto è, più "stabile" è la decisione (simile al cervello umano che ci pensa su).
-    THINKING_STEPS = 7
+    THINKING_STEPS = 6
     MIN_STEPS = 2           # Minimo sindacale per stabilizzarsi
-    HALT_THRESHOLD = 0.50      # Abbassato per evitare stop troppo precoci
+    HALT_THRESHOLD = 0.75      # Abbassato per evitare stop troppo precoci
     # Configurazione Timeframe (Deve combaciare con Vectorizer e Modello)
-    tf_config = {"1d": 30, "4h": 50, "1h": 100}
+    tf_config = tf_config
 
     print(f"\n--- 1. AVVIO SISTEMA PER {PAIR} ---")
 
@@ -79,7 +79,7 @@ def run_brain_cycle(pair: dict):
     ).to(device)
 
     # !IMPORTANTE!: Qui dovresti caricare i pesi addestrati.
-    model.load_state_dict(torch.load("trm_model_best.pth", map_location=device))
+    model.load_state_dict(torch.load("trm_model_best_long.pth", map_location=device))
     # Per ora usiamo pesi casuali inizializzati, quindi le decisioni saranno randomiche.
     model.eval()
 

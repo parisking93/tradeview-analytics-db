@@ -5,7 +5,8 @@ import os
 import json # Serve per parsare l'array dal DB
 
 class ActionDecoder:
-    def __init__(self, ref_price: float, pair: dict, max_qty: float = 50.0):
+    def __init__(self, ref_price: float, pair: dict, max_qty: float = 50.0, order: dict = None):
+
         self.ref_price = ref_price
         self.pair_name = pair.get('pair')
         self.pair = pair
@@ -20,6 +21,7 @@ class ActionDecoder:
         # Info Leva
         self.lev_buy_limits = limits.get('leverage_buy')
         self.lev_sell_limits = limits.get('leverage_sell')
+        self.order = order
 
     def decode(self, heads: dict, step_k: int) -> dict:
         """
@@ -99,6 +101,7 @@ class ActionDecoder:
         take_profit = round(take_profit, self.pair_decimals)
         stop_loss = round(stop_loss, self.pair_decimals)
 
+
         return {
             "step": step_k,
             "pair": self.pair_name,
@@ -110,7 +113,23 @@ class ActionDecoder:
             "take_profit": take_profit,
             "stop_loss": stop_loss,
             "ordertype": ordertype,
-            "leverage": final_leverage
+            "leverage": final_leverage,
+            "actionKraken": {
+                "pair": self.pair_name,
+                "tipo": decision,
+                "ordertype": ordertype,
+                "quando": ordertype,
+                "prezzo": limit_price,
+                "quantita": final_qty,
+                "quantita_eur": round(final_qty * limit_price, 2),
+                "leverage": final_leverage,
+                "take_profit": take_profit,
+                "stop_loss": stop_loss,
+                "timeframe": "24H",
+                "lato": decision,
+                "limite": limit_price if ordertype == "LIMIT" else None,
+                "reduce_only": False
+            }
         }
 
     def print_action(self, action: dict, is_final: bool = False):

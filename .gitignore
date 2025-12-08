@@ -28,4 +28,5 @@ dist-ssr
 .venv_amd_therock
 .pth
 models
+.json
 __pycache__

@@ -9,3 +9,7 @@ $env:MIOPEN_DEBUG_CONV_GEMM = "1"
 $env:MIOPEN_FIND_MODE = "3"
 
 python -m pip install numpy pandas scikit-learn einops huggingface_hub tqdm timesfm krakenex yfinance finnhub-python mysql-connector-python python-dotenv websockets
+
+
+
+ngrok tcp 3306
