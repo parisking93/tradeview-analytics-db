@@ -111,67 +111,86 @@ class MultiTimeframeTRM(nn.Module):
                  tf_configs: Dict[str, int],
                  input_size_per_candle: int,
                  static_size: int,
-                 hidden_dim: int = 256):
+                 hidden_dim: int = 512):
         super().__init__()
 
         self.hidden_dim = hidden_dim
 
-        # --- GLI OCCHI (Encoders Temporali) ---
+        # --- CONFIGURAZIONE ENCODER (GLI OCCHI) ---
+        # Aumentiamo a 128 per catturare più dettagli
+        self.encoder_hidden = 128
+
+        # Definiamo quante features estraiamo per ogni sequenza:
+        # 1. Last State (Come finisce)
+        # 2. Max Pool (Picchi massimi)
+        # 3. Mean Pool (Trend medio)
+        # Totale: 128 * 3 = 384 features per ogni timeframe
+        self.per_seq_dim = self.encoder_hidden * 3
+
         self.timeframe_encoders = nn.ModuleDict()
         self.tf_names = list(tf_configs.keys())
 
-        # 1. Encoders per lo Storico (1d, 4h, 1h...)
+        # 1. Encoders per lo Storico
         for tf in self.tf_names:
             self.timeframe_encoders[tf] = nn.GRU(
                 input_size=input_size_per_candle,
-                hidden_size=64,
+                hidden_size=self.encoder_hidden,
+                num_layers=2,        # Un po' di profondità extra
+                dropout=0.1,         # Evita overfitting sui layer interni
                 batch_first=True
             )
 
-
-        # TO BE
-        # self.timeframe_encoders[tf] = nn.GRU(
-        #     input_size=input_size_per_candle,
-        #     num_layers=2,
-        #     hidden_size=256,
-        #     batch_first=True,
-        # dropout=0.1,
-        # )
-        # 2. Encoder per il Forecast (Sequenza Futura)
-        # Usa la stessa input size delle candele perché la tabella è uguale
+        # 2. Encoder per il Forecast
         self.forecast_encoder = nn.GRU(
             input_size=input_size_per_candle,
-            hidden_size=64,
+            hidden_size=self.encoder_hidden,
+            num_layers=2,
+            dropout=0.1,
             batch_first=True
         )
-        # TO BE
-        # self.forecast_encoder = nn.GRU(
-        #     input_size=input_size_per_candle,
-        #     num_layers=2,
-        #     hidden_size=128,
-        #     batch_first=True
-            # dropout=0.1,
-        # )
-        # Dimensione totale contesto:
-        # (64 * numero TF storici) + (64 * forecast) + dimensione statico (ordine)
-        total_context_size = (64 * len(self.tf_names)) + 64 + static_size
 
+        # --- CALCOLO DIMENSIONE CONTESTO ---
+        # (Dimensione seq * (numero TF storici + 1 forecast)) + dati statici
+        total_context_size = (self.per_seq_dim * (len(self.tf_names) + 1)) + static_size
+
+        # Proiezione verso il cervello centrale
         self.context_proj = nn.Linear(total_context_size, hidden_dim)
 
-        # ... (Resto del cervello e heads invariato) ...
+        # --- IL CERVELLO CENTRALE (RIMANE UGUALE) ---
         self.gru_cell = nn.GRUCell(hidden_dim, hidden_dim)
+
         self.residual = nn.Sequential(
-            nn.Linear(hidden_dim * 2, hidden_dim * 2), nn.ReLU(),
+            nn.Linear(hidden_dim * 2, hidden_dim * 2),
+            nn.ReLU(),
             nn.Linear(hidden_dim * 2, hidden_dim)
         )
+
+        # --- HEADS (OUTPUT) ---
         self.head_side = nn.Linear(hidden_dim, 3)
         self.head_qty = nn.Linear(hidden_dim, 1)
         self.head_px = nn.Linear(hidden_dim, 1)
         self.head_tp = nn.Linear(hidden_dim, 1)
         self.head_sl = nn.Linear(hidden_dim, 1)
         self.head_lev  = nn.Linear(hidden_dim, 1)
-        self.head_ordertype = nn.Linear(hidden_dim, 2)  # logits: 0=limit, 1=market
-        self.head_halt      = nn.Linear(hidden_dim, 1)  # sigmoid -> p_halt (ACT)
+        self.head_ordertype = nn.Linear(hidden_dim, 2)
+        self.head_halt      = nn.Linear(hidden_dim, 1)
+
+    def _summarize_seq(self, out: torch.Tensor) -> torch.Tensor:
+        """
+        Helper function per estrarre Last + Max + Mean da un output GRU.
+        out shape: (Batch, SeqLen, Hidden)
+        """
+        # 1. Last step (l'ultimo stato temporale)
+        last_step = out[:, -1, :]
+
+        # 2. Max Pooling (il valore massimo raggiunto su ogni feature nella sequenza)
+        max_pool = torch.max(out, dim=1)[0]
+
+        # 3. Mean Pooling (la media dei valori nella sequenza)
+        mean_pool = torch.mean(out, dim=1)
+
+        # Concatena tutto: (Batch, Hidden*3)
+        return torch.cat([last_step, max_pool, mean_pool], dim=-1)
 
     def forward(self, inputs: Dict[str, torch.Tensor], h: Optional[torch.Tensor] = None):
         tf_summaries = []
@@ -180,24 +199,31 @@ class MultiTimeframeTRM(nn.Module):
         for tf in self.tf_names:
             seq = inputs[f"seq_{tf}"]
             if seq.ndim == 2: seq = seq.unsqueeze(0)
-            _, hidden = self.timeframe_encoders[tf](seq)
-            tf_summaries.append(hidden[-1])
+
+            # GRU ritorna: output, h_n. A noi serve output per fare pooling.
+            gru_out, _ = self.timeframe_encoders[tf](seq)
+
+            # Usiamo l'helper per estrarre il riassunto ricco
+            tf_summaries.append(self._summarize_seq(gru_out))
 
         # 2. Processa Forecast
         seq_fc = inputs["seq_forecast"]
         if seq_fc.ndim == 2: seq_fc = seq_fc.unsqueeze(0)
-        _, hidden_fc = self.forecast_encoder(seq_fc)
-        tf_summaries.append(hidden_fc[-1]) # Aggiungi riassunto forecast
+
+        fc_out, _ = self.forecast_encoder(seq_fc)
+        tf_summaries.append(self._summarize_seq(fc_out))
 
         # 3. Statico
         static_data = inputs["static"]
         if static_data.ndim == 1: static_data = static_data.unsqueeze(0)
 
-        # Fusione
+        # 4. Fusione e Ragionamento
         full_context = torch.cat(tf_summaries + [static_data], dim=-1)
+
         brain_input = F.relu(self.context_proj(full_context))
 
         if h is None: h = torch.zeros_like(brain_input)
+
         h_new = self.gru_cell(brain_input, h)
         combined = torch.cat([brain_input, h_new], dim=-1)
         y = h_new + self.residual(combined)
@@ -205,7 +231,7 @@ class MultiTimeframeTRM(nn.Module):
         return y, h_new
 
     def get_heads_dict(self, y):
-        # ... (invariato) ...
+        # Mantenuto uguale all'originale per compatibilità con il Trainer
         return {
             "side": self.head_side(y),
             "qty": torch.sigmoid(self.head_qty(y)),
