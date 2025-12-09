@@ -1,199 +1,99 @@
 {
     "watchlist": {
-        "AAVE/EUR": {
-            "added_at": "2025-12-07T06:44:52.002216",
-            "last_high_decision": "SELL"
-        },
-        "ADA/EUR": {
-            "added_at": "2025-12-07T06:44:54.998183",
-            "last_high_decision": "SELL"
-        },
-        "APE/EUR": {
-            "added_at": "2025-12-07T06:45:01.266074",
-            "last_high_decision": "BUY"
-        },
-        "APT/EUR": {
-            "added_at": "2025-12-07T06:45:04.462137",
-            "last_high_decision": "BUY"
-        },
-        "ARB/EUR": {
-            "added_at": "2025-12-07T06:45:07.524074",
-            "last_high_decision": "SELL"
-        },
-        "AVAX/EUR": {
-            "added_at": "2025-12-07T06:45:13.640526",
-            "last_high_decision": "SELL"
-        },
-        "BCH/EUR": {
-            "added_at": "2025-12-07T06:45:22.953168",
-            "last_high_decision": "SELL"
-        },
-        "BLUR/EUR": {
-            "added_at": "2025-12-07T06:45:26.065025",
-            "last_high_decision": "BUY"
-        },
-        "CHZ/EUR": {
-            "added_at": "2025-12-07T06:45:29.331501",
-            "last_high_decision": "SELL"
-        },
-        "DASH/EUR": {
-            "added_at": "2025-12-07T06:45:41.672218",
-            "last_high_decision": "BUY"
-        },
-        "FARTCOIN/EUR": {
-            "added_at": "2025-12-07T06:45:47.820324",
-            "last_high_decision": "SELL"
-        },
-        "FLOW/EUR": {
-            "added_at": "2025-12-07T06:45:53.956027",
-            "last_high_decision": "SELL"
-        },
-        "ICP/EUR": {
-            "added_at": "2025-12-07T06:46:03.241163",
-            "last_high_decision": "BUY"
-        },
-        "INJ/EUR": {
-            "added_at": "2025-12-07T06:46:06.401037",
-            "last_high_decision": "SELL"
-        },
-        "KAVA/EUR": {
-            "added_at": "2025-12-07T06:46:09.442730",
-            "last_high_decision": "BUY"
-        },
-        "KSM/EUR": {
-            "added_at": "2025-12-07T06:46:15.747239",
-            "last_high_decision": "BUY"
-        },
-        "LDO/EUR": {
-            "added_at": "2025-12-07T06:46:18.888808",
-            "last_high_decision": "BUY"
-        },
-        "LINK/EUR": {
-            "added_at": "2025-12-07T06:46:21.934835",
-            "last_high_decision": "SELL"
-        },
-        "LRC/EUR": {
-            "added_at": "2025-12-07T06:46:25.118355",
-            "last_high_decision": "SELL"
-        },
         "SC/EUR": {
-            "added_at": "2025-12-07T06:46:59.283525",
-            "last_high_decision": "SELL"
-        },
-        "STRK/EUR": {
-            "added_at": "2025-12-07T06:47:11.586025",
-            "last_high_decision": "BUY"
-        },
-        "SUI/EUR": {
-            "added_at": "2025-12-07T06:47:14.767527",
-            "last_high_decision": "SELL"
-        },
-        "TON/EUR": {
-            "added_at": "2025-12-07T06:47:20.954571",
-            "last_high_decision": "SELL"
-        },
-        "TRUMP/EUR": {
-            "added_at": "2025-12-07T06:47:23.950026",
-            "last_high_decision": "SELL"
-        },
-        "UNI/EUR": {
-            "added_at": "2025-12-07T06:47:30.069364",
-            "last_high_decision": "BUY"
-        },
-        "XDG/EUR": {
-            "added_at": "2025-12-07T06:47:39.323063",
+            "added_at": "2025-12-08T22:41:32.542959",
             "last_high_decision": "SELL"
         },
         "ETH/EUR": {
-            "added_at": "2025-12-07T06:47:45.587034",
+            "added_at": "2025-12-08T22:42:41.398923",
             "last_high_decision": "SELL"
         },
         "LTC/EUR": {
-            "added_at": "2025-12-07T06:47:48.673433",
-            "last_high_decision": "SELL"
-        },
-        "REP/EUR": {
-            "added_at": "2025-12-07T06:47:51.949075",
-            "last_high_decision": "BUY"
-        },
-        "XMR/EUR": {
-            "added_at": "2025-12-07T06:48:04.303978",
-            "last_high_decision": "BUY"
-        },
-        "ZEC/EUR": {
-            "added_at": "2025-12-07T06:48:10.452605",
-            "last_high_decision": "BUY"
-        },
-        "ALGO/EUR": {
-            "added_at": "2025-12-07T06:44:58.125633",
-            "last_high_decision": "SELL"
-        },
-        "AXS/EUR": {
-            "added_at": "2025-12-07T06:45:16.786956",
-            "last_high_decision": "SELL"
-        },
-        "COMP/EUR": {
-            "added_at": "2025-12-07T06:45:32.346242",
-            "last_high_decision": "BUY"
-        },
-        "DAI/EUR": {
-            "added_at": "2025-12-07T06:45:38.495252",
-            "last_high_decision": "SELL"
-        },
-        "DOT/EUR": {
-            "added_at": "2025-12-07T06:45:44.668066",
-            "last_high_decision": "SELL"
-        },
-        "GRT/EUR": {
-            "added_at": "2025-12-07T06:46:00.214549",
-            "last_high_decision": "SELL"
-        },
-        "MANA/EUR": {
-            "added_at": "2025-12-07T06:46:28.177526",
-            "last_high_decision": "SELL"
-        },
-        "NANO/EUR": {
-            "added_at": "2025-12-07T06:46:34.360179",
-            "last_high_decision": "BUY"
-        },
-        "NEAR/EUR": {
-            "added_at": "2025-12-07T06:46:37.606757",
-            "last_high_decision": "SELL"
-        },
-        "OMG/EUR": {
-            "added_at": "2025-12-07T06:46:40.693459",
+            "added_at": "2025-12-08T22:42:46.077915",
             "last_high_decision": "SELL"
         },
         "POL/EUR": {
-            "added_at": "2025-12-07T06:46:53.103030",
-            "last_high_decision": "SELL"
-        },
-        "SAND/EUR": {
-            "added_at": "2025-12-07T06:46:56.246924",
-            "last_high_decision": "BUY"
-        },
-        "SEI/EUR": {
-            "added_at": "2025-12-07T06:47:02.432438",
-            "last_high_decision": "SELL"
-        },
-        "SHIB/EUR": {
-            "added_at": "2025-12-07T06:47:05.426228",
+            "added_at": "2025-12-08T17:02:27.333041",
             "last_high_decision": "SELL"
         },
         "SOL/EUR": {
-            "added_at": "2025-12-07T06:47:08.585750",
-            "last_high_decision": "SELL"
-        },
-        "TAO/EUR": {
-            "added_at": "2025-12-07T06:47:17.771523",
-            "last_high_decision": "SELL"
-        },
-        "ETC/EUR": {
-            "added_at": "2025-12-07T06:47:42.396700",
+            "added_at": "2025-12-08T17:02:48.729104",
             "last_high_decision": "SELL"
         },
         "XTZ/EUR": {
-            "added_at": "2025-12-07T06:47:55.038024",
+            "added_at": "2025-12-08T22:42:55.752261",
+            "last_high_decision": "SELL"
+        },
+        "FIL/EUR": {
+            "added_at": "2025-12-08T20:41:19.242662",
+            "last_high_decision": "SELL"
+        },
+        "MINA/EUR": {
+            "added_at": "2025-12-08T21:40:26.119906",
+            "last_high_decision": "SELL"
+        },
+        "ATOM/EUR": {
+            "added_at": "2025-12-08T22:38:58.424696",
+            "last_high_decision": "SELL"
+        },
+        "MANA/EUR": {
+            "added_at": "2025-12-08T22:40:49.522914",
+            "last_high_decision": "SELL"
+        },
+        "STRK/EUR": {
+            "added_at": "2025-12-08T22:41:50.056472",
+            "last_high_decision": "SELL"
+        },
+        "DASH/EUR": {
+            "added_at": "2025-12-08T22:39:43.075624",
+            "last_high_decision": "SELL"
+        },
+        "XBT/EUR": {
+            "added_at": "2025-12-08T21:42:19.077004",
+            "last_high_decision": "BUY"
+        },
+        "APT/EUR": {
+            "added_at": "2025-12-08T22:38:49.294118",
+            "last_high_decision": "SELL"
+        },
+        "CHZ/EUR": {
+            "added_at": "2025-12-08T22:39:25.571687",
+            "last_high_decision": "SELL"
+        },
+        "TRUMP/EUR": {
+            "added_at": "2025-12-08T22:42:06.924166",
+            "last_high_decision": "SELL"
+        },
+        "FLR/EUR": {
+            "added_at": "2025-12-08T22:40:05.115276",
+            "last_high_decision": "SELL"
+        },
+        "LDO/EUR": {
+            "added_at": "2025-12-08T22:40:36.317387",
+            "last_high_decision": "SELL"
+        },
+        "SAND/EUR": {
+            "added_at": "2025-12-08T22:41:28.108966",
+            "last_high_decision": "SELL"
+        },
+        "ICP/EUR": {
+            "added_at": "2025-12-08T22:40:14.072563",
+            "last_high_decision": "SELL"
+        },
+        "BAT/EUR": {
+            "added_at": "2025-12-08T22:39:12.024542",
+            "last_high_decision": "SELL"
+        },
+        "NANO/EUR": {
+            "added_at": "2025-12-08T22:40:58.085072",
+            "last_high_decision": "SELL"
+        },
+        "UNI/EUR": {
+            "added_at": "2025-12-08T22:42:16.248637",
+            "last_high_decision": "SELL"
+        },
+        "SUI/EUR": {
+            "added_at": "2025-12-08T22:41:54.263627",
             "last_high_decision": "SELL"
         }
     },
