@@ -20,15 +20,15 @@ from trading.KrakenOrderRunner import KrakenOrderRunner
 # ==============================================================================
 
 # File dei pesi
-MODEL_PATH_HIGH = "trm_model_best_512_high.pth"
-MODEL_PATH_LOW  = "trm_model_best_512_low.pth"
+MODEL_PATH_HIGH = "trm_model_best_512_high_b.pth"
+MODEL_PATH_LOW  = "trm_model_best.pth"
 
 # Configurazione Timeframe
 TF_CONFIG_HIGH = {"1d": 30, "4h": 50, "1h": 100}
 TF_CONFIG_LOW  = {"1h": 30, "15m": 50, "5m": 100}
 
 # Parametri del Thinking Loop
-THINKING_STEPS = 6
+THINKING_STEPS = 7
 MIN_STEPS = 2
 HALT_THRESHOLD = 0.70
 
@@ -234,6 +234,8 @@ def _ensure_global_wallet_balance(context_data):
     global GLOBAL_WALLET_BALANCE
     if GLOBAL_WALLET_BALANCE is None:
         GLOBAL_WALLET_BALANCE = _safe_float((context_data or {}).get("wallet_balance"), default=0.0)
+    if GLOBAL_WALLET_BALANCE < 0.0:
+        GLOBAL_WALLET_BALANCE = 0.0
     return GLOBAL_WALLET_BALANCE
 
 def _update_wallet_on_open(cost):
@@ -449,7 +451,7 @@ def run_high_tf_job(brain: BrainInstance, state_mgr: StateManager, all_pairs):
         base_currency = pair['base']
 
         try:
-            context = db.get_trading_context(base_currency, TF_CONFIG_HIGH, with_orders=True)
+            context = db.get_trading_context(base_currency, TF_CONFIG_HIGH, with_orders=True, type_forecast="advanced")
         except Exception as e:
             continue
 
@@ -534,7 +536,7 @@ def run_low_tf_job(brain: BrainInstance, state_mgr: StateManager, all_pairs):
                     _reset_blocked_attempt(pair_name)
             else:
                 _reset_blocked_attempt(pair_name)
-            continue
+                continue
         else:
             _reset_blocked_attempt(pair_name)
 

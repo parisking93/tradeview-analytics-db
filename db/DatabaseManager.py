@@ -470,7 +470,7 @@ class DatabaseManager:
     # ==============================================================================
     # METODO GET_TRADING_CONTEXT (AGGIORNATO PROFESSIONALE)
     # ==============================================================================
-    def get_trading_context(self, base_currency: str, history_config: dict, with_orders: bool = False,test_mode: bool = True):
+    def get_trading_context(self, base_currency: str, history_config: dict, with_orders: bool = False,test_mode: bool = True, type_forecast: str = "standard"):
         """
         Recupera il contesto di trading.
         Logica per il Current Price: Dinamica e basata sul Timestamp.
@@ -550,8 +550,12 @@ class DatabaseManager:
             WHERE base = %s and timeframe IN (%s, %s, %s, %s)
             ORDER BY timestamp DESC LIMIT 4
         """
+        forecast1 = '1h+1' if type_forecast == "standard" else '1d+1'
+        forecast2 = '1h+2' if type_forecast == "standard" else '1d+2'
+        forecast3 = '15m+1' if type_forecast == "standard" else '4h+1'
+        forecast4 = '15m+2' if type_forecast == "standard" else '4h+2'
         try:
-            self.cursor.execute(query_forecast, (base_currency,'1h+1','1h+2','15m+1','15m+2'))
+            self.cursor.execute(query_forecast, (base_currency,forecast1,forecast2,forecast3,forecast4))
             columns = [col[0] for col in self.cursor.description]
             context_data["forecast"] = [dict(zip(columns, row)) for row in self.cursor.fetchall()]
         except mysql.connector.Error:

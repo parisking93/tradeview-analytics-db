@@ -55,16 +55,16 @@ def to_datetime(ts):
 
 def train_loop():
     # --- CONFIGURAZIONE ---
-    TF_CONFIG = {"1d": 30, "4h": 50, "1h": 100}
+    TF_CONFIG = {"1h": 30, "15m": 50, "5m": 100}
 
     # Configurazione Forecast
-    TF_CONFIG_FORECAST = {"1d+1": 1, "1d+2": 1, "4h+1": 1, "4h+2": 1}
+    TF_CONFIG_FORECAST = {"1h+1": 1, "1h+2": 1, "15m+1": 1, "15m+2": 1}
     FORECAST_FORWARD_TF = "1d" # Quanto in avanti guardiamo per selezionare il forecast
 
-    LOOKAHEAD_STEPS = 24  # 24 ore nel futuro per l'Oracolo (Target)
-    EPOCHS = 400
-    CACHE_LIMIT = 200000    # Candele storiche
-    FORECAST_CACHE_LIMIT = 40000 # Forecast limit
+    LOOKAHEAD_STEPS = 18  # 24 ore nel futuro per l'Oracolo (Target)
+    EPOCHS = 600
+    CACHE_LIMIT = 300000    # Candele storiche
+    FORECAST_CACHE_LIMIT = 100000 # Forecast limit
 
     # --- SETUP ---
     print("--- INIZIALIZZAZIONE DB E PROVIDER ---")
@@ -153,7 +153,7 @@ def train_loop():
 
     # --- TRAINING LOOP ---
     moving_avg_loss = 0.0
-    best_loss = float(3.0)
+    best_loss = float('inf')
     global_step = 0
 
     for epoch in range(EPOCHS):
@@ -290,7 +290,7 @@ def train_loop():
                 epoch_losses.append(loss)
                 moving_avg_loss = 0.99 * moving_avg_loss + 0.01 * loss if global_step > 1 else loss
 
-                if global_step % 20 == 0:
+                if global_step % 10 == 0:
                     side_str = ["BUY", "SELL", "HOLD"][metrics['target_side']]
                     pred_str = ["BUY", "SELL", "HOLD"][metrics['pred_side']]
                     print(f"[Ep {epoch+1}][Step {global_step}] {pair_name} | Loss: {loss:.4f} (Avg: {moving_avg_loss:.4f}) | T: {side_str} vs P: {pred_str}")
@@ -303,7 +303,7 @@ def train_loop():
             if avg_epoch_loss < best_loss:
                 print(f"🌟 NUOVO RECORD (Old: {best_loss:.5f} -> New: {avg_epoch_loss:.5f}) - Salvataggio...")
                 best_loss = avg_epoch_loss
-                trainer.save_checkpoint("trm_model_best.pth")
+                trainer.save_checkpoint("trm_model_best_check.pth")
             else:
                 print(f"--- Nessun miglioramento (Best: {best_loss:.5f}) ---")
 
