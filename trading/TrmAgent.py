@@ -240,5 +240,5 @@ class MultiTimeframeTRM(nn.Module):
             "sl_mult": F.softplus(self.head_sl(y)),
             "halt_prob": torch.sigmoid(self.head_halt(y)),
             "ordertype": self.head_ordertype(y),
-            "leverage": F.softplus(self.head_lev(y)) + 1.0
+            "leverage": (F.softplus(self.head_lev(y)) + 1.0).clamp(1.0, 5.0)
         }

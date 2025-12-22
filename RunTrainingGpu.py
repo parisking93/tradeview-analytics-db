@@ -124,10 +124,10 @@ def train_loop():
     TF_CONFIG_FORECAST = {"1h+1": 1, "1h+2": 1, "15m+1": 1, "15m+2": 1}
     FORECAST_FORWARD_TF = "1d" # Quanto in avanti guardiamo per selezionare il forecast
 
-    LOOKAHEAD_STEPS = 170  # 24 ore nel futuro per l'Oracolo (Target)
+    LOOKAHEAD_STEPS = 180  # 24 ore nel futuro per l'Oracolo (Target)
     EPOCHS = 700
-    CACHE_LIMIT = 400000    # Candele storiche
-    FORECAST_CACHE_LIMIT = 400000 # Forecast limit
+    CACHE_LIMIT = 500000    # Candele storiche
+    FORECAST_CACHE_LIMIT = 500000 # Forecast limit
 
     # --- SETUP ---
     print("--- INIZIALIZZAZIONE DB E PROVIDER ---")

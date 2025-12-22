@@ -44,6 +44,7 @@ class TradingTrainer:
         # Qui USIAMO i pesi per bilanciare l'Hold
         self.weights_side = torch.tensor([2.7, 2.7, 1.0])
         self.loss_ce_side = nn.CrossEntropyLoss(weight=self.weights_side)
+        self.loss_lev = torch.nn.SmoothL1Loss(reduction='none')
 
         # 2. Loss per ORDER TYPE (2 classi: Limit, Market)
         # Qui NON usiamo pesi (o standard), perche Limit e Market sono bilanciati
@@ -330,7 +331,7 @@ class TradingTrainer:
                 }
 
             # --- 2. ANALISI MERCATO ---
-            MIN_PROFIT_PCT = 0.013
+            MIN_PROFIT_PCT = 0.016
             MAX_STOP_LOSS_TOLERANCE = 0.020
             RISK_PER_TRADE = 0.02
 
@@ -599,7 +600,9 @@ class TradingTrainer:
             loss_sl_step  = (self.loss_mse(preds['sl_mult'], t_sl) * is_active).mean().squeeze()
             loss_px_step  = (self.loss_mse(preds['price_offset'], t_px) * is_active).mean().squeeze()
 
-            loss_lev_step  = self.loss_mse(preds['leverage'], t_lev).squeeze()          # scalare
+            pred_lev = preds['leverage'].clamp(1.0, 5.0)
+            t_lev_c  = t_lev.clamp(1.0, 5.0)
+            loss_lev_step = (self.loss_lev(pred_lev, t_lev_c) * is_active).mean().squeeze()  # scalare
             loss_type_step = self.loss_ce_type(preds['ordertype'], t_type).squeeze()    # scalare
             # loss_halt_step = self.loss_bce(preds['halt_prob'], t_halt).squeeze()        # scalare
 
