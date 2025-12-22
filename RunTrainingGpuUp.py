@@ -12,7 +12,7 @@ from db.DatabaseManager import DatabaseManager
 from db.MarketDataProvider import MarketDataProvider
 from trading.Vectorizer import DataVectorizer, VectorizerConfig
 from trading.TrmAgent import MultiTimeframeTRM
-from trading.Trainer import TradingTrainer
+from trading.TrainerUp import TradingTrainer
 
 def add_timeframe_py(dt_obj, timeframe_str):
     """
@@ -58,10 +58,6 @@ def to_datetime(ts):
 def simulate_pnl_from_preds(preds, current_price, future_segment, fee_rate=0.001):
     """
     Validazione rapida PnL (EUR) su un singolo sample.
-    Ritorna (pnl, is_trade) dove:
-      - pnl: profitto/perdita in EUR
-      - is_trade: 1 se è stato aperto un trade, 0 se HOLD
-
     Assunzioni semplici ma coerenti:
       - side: 0 BUY, 1 SELL, 2 HOLD
       - entry: current_price
@@ -71,7 +67,7 @@ def simulate_pnl_from_preds(preds, current_price, future_segment, fee_rate=0.001
     """
     side = int(torch.argmax(preds["side"]).item())
     if side == 2:
-        return 0.0, 0  # HOLD: no trade
+        return 0.0
 
     entry = float(current_price)
     qty_frac = float(preds["qty"].clamp(0, 1).item())
@@ -79,7 +75,7 @@ def simulate_pnl_from_preds(preds, current_price, future_segment, fee_rate=0.001
 
     notional = 100.0 * qty_frac * lev
     if notional <= 0.0 or entry <= 0.0:
-        return 0.0, 0
+        return 0.0
 
     tp_mult = float(preds["tp_mult"].clamp(0, 10).item())
     sl_mult = float(preds["sl_mult"].clamp(0, 10).item())
@@ -114,20 +110,19 @@ def simulate_pnl_from_preds(preds, current_price, future_segment, fee_rate=0.001
         raw_ret = (entry - exit_px) / entry
 
     net_ret = raw_ret - 2.0 * fee_rate
-    return float(notional * net_ret), 1  # 1 = trade effettuato
+    return float(notional * net_ret)
 
 def train_loop():
     # --- CONFIGURAZIONE ---
-    TF_CONFIG = {"1h": 30, "15m": 50, "5m": 100}
-
+    TF_CONFIG = {"1d": 30, "4h": 50, "1h": 100}
     # Configurazione Forecast
-    TF_CONFIG_FORECAST = {"1h+1": 1, "1h+2": 1, "15m+1": 1, "15m+2": 1}
+    TF_CONFIG_FORECAST = {"1d+1": 1, "1d+2": 1, "4h+1": 1, "4h+2": 1}
     FORECAST_FORWARD_TF = "1d" # Quanto in avanti guardiamo per selezionare il forecast
 
-    LOOKAHEAD_STEPS = 170  # 24 ore nel futuro per l'Oracolo (Target)
+    LOOKAHEAD_STEPS = 24  # 24 ore nel futuro per l'Oracolo (Target)
     EPOCHS = 700
-    CACHE_LIMIT = 400000    # Candele storiche
-    FORECAST_CACHE_LIMIT = 400000 # Forecast limit
+    CACHE_LIMIT = 300000    # Candele storiche
+    FORECAST_CACHE_LIMIT = 100000 # Forecast limit
 
     # --- SETUP ---
     print("--- INIZIALIZZAZIONE DB E PROVIDER ---")
@@ -221,11 +216,6 @@ def train_loop():
 
     for epoch in range(EPOCHS):
         print(f"\n=== EPOCH {epoch+1}/{EPOCHS} ===")
-        simulated_wallet = 0
-        if random.random() < 0.1:
-            simulated_wallet = random.uniform(0.1, 15.0)
-        else:
-            simulated_wallet = random.uniform(400.0, 1000.0)
 
         random.shuffle(all_pairs)
         epoch_losses = []
@@ -240,13 +230,13 @@ def train_loop():
             if not cached_pair_data:
                 continue
 
-            candles_1h = cached_pair_data.get('5m', [])
-            required_len = TF_CONFIG['5m'] + LOOKAHEAD_STEPS + 10
+            candles_1h = cached_pair_data.get('1h', [])
+            required_len = TF_CONFIG['1h'] + LOOKAHEAD_STEPS + 10
             if len(candles_1h) < required_len:
                 continue
 
             # Selezione Pivot Casuale
-            min_idx = TF_CONFIG['5m'] + 2
+            min_idx = TF_CONFIG['1h'] + 2
             max_idx = len(candles_1h) - LOOKAHEAD_STEPS - 2
 
             if min_idx >= max_idx:
@@ -357,10 +347,9 @@ def train_loop():
             pair_inputs['pair'] = pair_data.get('pair'); pair_inputs['base'] = pair_data.get('base'); pair_inputs['quote'] = pair_data.get('quote'); pair_inputs['kr_pair'] = pair_data.get('kr_pair')
 
             # 6. Training Step
-            metrics = trainer.train_step(context, pair_inputs, future_segment, global_step, True, simulated_wallet)
+            metrics = trainer.train_step(context, pair_inputs, future_segment, global_step)
 
             if metrics:
-                simulated_wallet = metrics['simulated_wallet']
                 global_step += 1
                 loss = metrics['loss']
                 epoch_losses.append(loss)
@@ -369,10 +358,7 @@ def train_loop():
                 if global_step % 10 == 0:
                     side_str = ["BUY", "SELL", "HOLD"][metrics['target_side']]
                     pred_str = ["BUY", "SELL", "HOLD"][metrics['pred_side']]
-                    # Loggare le loss per head
                     print(f"[Ep {epoch+1}][Step {global_step}] {pair_name} | Loss: {loss:.4f} (Avg: {moving_avg_loss:.4f}) | T: {side_str} vs P: {pred_str}")
-                    print(f"  ├─ side:{metrics.get('loss_side', 0):.4f} | type:{metrics.get('loss_type', 0):.4f} | qty:{metrics.get('loss_qty', 0):.4f} | px:{metrics.get('loss_px', 0):.4f}")
-                    print(f"  └─ tp:{metrics.get('loss_tp', 0):.4f} | sl:{metrics.get('loss_sl', 0):.4f} | lev:{metrics.get('loss_lev', 0):.4f} | halt:{metrics.get('loss_halt', 0):.4f}")
 
 
         # === FINE EPOCA ===
@@ -384,7 +370,6 @@ def train_loop():
             model.eval()
             val_samples = 200
             val_pnls = []
-            val_trades = []  # Traccia numero di trade per campione
 
             with torch.no_grad():
                 for _ in range(val_samples):
@@ -396,12 +381,12 @@ def train_loop():
                     if not cached_pair_data_v or not cached_forecast_data_v:
                         continue
 
-                    candles_1h_v = cached_pair_data_v.get("5m", [])
-                    required_len_v = TF_CONFIG["5m"] + LOOKAHEAD_STEPS + 10
+                    candles_1h_v = cached_pair_data_v.get("1h", [])
+                    required_len_v = TF_CONFIG["1h"] + LOOKAHEAD_STEPS + 10
                     if len(candles_1h_v) < required_len_v:
                         continue
 
-                    min_idx_v = TF_CONFIG["5m"] + 2
+                    min_idx_v = TF_CONFIG["1h"] + 2
                     max_idx_v = len(candles_1h_v) - LOOKAHEAD_STEPS - 2
                     if min_idx_v >= max_idx_v:
                         continue
@@ -485,9 +470,8 @@ def train_loop():
                         preds_v = model.get_heads_dict(y_v)
 
                     current_price_v = float(context_v["candles"]["1h"][-1]["close"])
-                    pnl_v, is_trade_v = simulate_pnl_from_preds(preds_v, current_price_v, future_segment_v, fee_rate=0.001)
+                    pnl_v = simulate_pnl_from_preds(preds_v, current_price_v, future_segment_v, fee_rate=0.001)
                     val_pnls.append(pnl_v)
-                    val_trades.append(is_trade_v)
 
             # === CALCOLO SCORE PENALIZZATO ===
             # Skip validation se non abbiamo campioni
@@ -504,8 +488,6 @@ def train_loop():
             lambda_trade = 0.5   # Penalità PER FREQUENZA TRADING (non assoluto)
 
             # Score = PnL medio - penalità proporzionale alla frequenza trading
-            # Se fai il 100% di trade (1.0), sottrai lambda_trade * 1.0 = 0.5 dal PnL
-            # Se fai il 50% di trade (0.5), sottrai lambda_trade * 0.5 = 0.25 dal PnL
             penalized_score = avg_val_pnl - lambda_trade * trade_freq
 
             # Sanity check
@@ -519,14 +501,15 @@ def train_loop():
             model.train()
 
             # Salva il miglior modello per score penalizzato
-            if penalized_score > best_penalized_score + 1e-8:  # epsilon per evitare flip su valori molto vicini
+            if penalized_score > best_penalized_score + 1e-8:
                 print(f"🌟 NUOVO BEST SCORE (Old: {best_penalized_score:.4f} -> New: {penalized_score:.4f}) - Salvataggio...")
                 best_penalized_score = penalized_score
-                trainer.save_checkpoint("trainerBest.pth")
+                trainer.save_checkpoint("trainerUpPnl.pth")
             else:
                 print(f"--- Nessun miglioramento SCORE (Best: {best_penalized_score:.4f}) ---")
 
         db.close_connection()
+
 
 if __name__ == "__main__":
     train_loop()

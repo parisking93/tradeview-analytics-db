@@ -20,8 +20,8 @@ from trading.KrakenOrderRunner import KrakenOrderRunner
 # ==============================================================================
 
 # File dei pesi
-MODEL_PATH_HIGH = "trm_model_best_512_high_b.pth"
-MODEL_PATH_LOW  = "trm_model_best.pth"
+MODEL_PATH_HIGH = "trainerUpPnl.pth"
+MODEL_PATH_LOW  = "trainerBestFirst.pth"
 
 # Configurazione Timeframe
 TF_CONFIG_HIGH = {"1d": 30, "4h": 50, "1h": 100}
@@ -189,7 +189,19 @@ class BrainInstance:
                 halt_prob = current_heads['halt_prob'].item()
 
                 can_stop = (steps_taken >= MIN_STEPS)
-                wants_to_stop = (halt_prob >= HALT_THRESHOLD)
+                # ---- HALT threshold schedule per-step ----
+                # primi step: serve più certezza per fermarsi; ultimi step: soglia più permissiva
+                t0 = 0.85  # subito dopo MIN_STEPS
+                t1 = 0.65  # verso l'ultimo step
+
+                if THINKING_STEPS > MIN_STEPS:
+                    prog = (steps_taken - MIN_STEPS) / float(THINKING_STEPS - MIN_STEPS)
+                    prog = max(0.0, min(1.0, prog))
+                else:
+                    prog = 1.0
+
+                halt_thr_step = t0 + (t1 - t0) * prog
+                wants_to_stop = (halt_prob >= halt_thr_step)
                 forced_stop = (steps_taken == THINKING_STEPS)
 
                 temp_action = decoder.decode(current_heads, steps_taken)
@@ -531,6 +543,8 @@ def run_low_tf_job(brain: BrainInstance, state_mgr: StateManager, all_pairs):
                             _reset_blocked_attempt(pair_name)
                         else:
                             print(f"   [WARN] Cancellazione Kraken non riuscita per {pair_name}.")
+                    else:
+                        continue
                 else:
                     print(f"   [SKIP] {pair_name} ha gia un ordine aperto in esecuzione.")
                     _reset_blocked_attempt(pair_name)

@@ -36,7 +36,7 @@ class VectorizerConfig:
     ])
 
     string_columns_order: List[str] = field(default_factory=lambda: [
-        'pair', 'kr_pair', 'base', 'quote', 'type', 'subtype', 'status'
+        'pair', 'kr_pair', 'base', 'quote', 'type', 'subtype', 'status', 'orderType'
     ])
 
     # MODIFICA 3: Rimosso 'record_date'
