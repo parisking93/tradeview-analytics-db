@@ -21,7 +21,7 @@ from trading.KrakenOrderRunner import KrakenOrderRunner
 
 # File dei pesi
 MODEL_PATH_HIGH = "trainerUpPnl.pth"
-MODEL_PATH_LOW  = "trainerBestFirst.pth"
+MODEL_PATH_LOW  = "trainerBestonReview.pth"
 
 # Configurazione Timeframe
 TF_CONFIG_HIGH = {"1d": 30, "4h": 50, "1h": 100}
@@ -191,8 +191,8 @@ class BrainInstance:
                 can_stop = (steps_taken >= MIN_STEPS)
                 # ---- HALT threshold schedule per-step ----
                 # primi step: serve più certezza per fermarsi; ultimi step: soglia più permissiva
-                t0 = 0.85  # subito dopo MIN_STEPS
-                t1 = 0.65  # verso l'ultimo step
+                t0 = 0.65  # subito dopo MIN_STEPS
+                t1 = 0.55  # verso l'ultimo step
 
                 if THINKING_STEPS > MIN_STEPS:
                     prog = (steps_taken - MIN_STEPS) / float(THINKING_STEPS - MIN_STEPS)
@@ -201,6 +201,7 @@ class BrainInstance:
                     prog = 1.0
 
                 halt_thr_step = t0 + (t1 - t0) * prog
+                print(f"{self.print_prefix} {pair_data['pair']} Step {steps_taken}/{THINKING_STEPS} - Halt Prob: {halt_prob:.4f} vs Thr: {halt_thr_step:.4f}")
                 wants_to_stop = (halt_prob >= halt_thr_step)
                 forced_stop = (steps_taken == THINKING_STEPS)
 
@@ -366,9 +367,25 @@ def persist_order_to_db(action, context=None, pair_info=None, runner_results=Non
             _update_wallet_on_close(cash_back)
             return existing_order["id"]
 
-        price_entry = limit_price
+        # Determine current market price from context if available (prefer 5m close)
+        current_price_ctx = None
+        try:
+            current_price_ctx = float((context or {}).get('candles', {}).get('5m', [])[-1]['close'])
+        except Exception:
+            try:
+                current_price_ctx = float((context or {}).get('candles', {}).get('1h', [])[-1]['close'])
+            except Exception:
+                current_price_ctx = None
+
+        # If exec type is MARKET, use current market price as entry; otherwise persist limit_price
+        if order_exec_type == "MARKET":
+            price_entry = current_price_ctx if current_price_ctx is not None else limit_price
+        else:
+            price_entry = limit_price
+
         price_avg = price_entry
         price = price_entry
+        print(f"[PERSIST] order_exec_type={order_exec_type} price_entry={price_entry} limit_price={limit_price}")
         value_eur = qty * price
         pnl = 0.0
         lev_final = lev_value if lev_value > 0 else 1.0

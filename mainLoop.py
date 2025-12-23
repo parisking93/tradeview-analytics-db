@@ -25,8 +25,12 @@ TIMEFRAME_CONFIG = {
 FORECAST_CONTEXT_LEN = 120  # Numero di candele storiche da passare al modello
 FORECAST_STEPS = 3          # Quante candele future predire (+1, +2, +3)
 
-# Lock per evitare che partano due forecast sovrapposti sulla GPU/CPU
-forecast_lock = threading.Lock()
+# Lock per evitare forecast sovrapposti *per timeframe*
+# Così un forecast 1h lento non blocca il 15m e viceversa.
+# Lock che protegge il dizionario `forecast_locks` durante creazione/lettura
+forecast_locks_lock = threading.Lock()
+# Inizializza un lock per ogni timeframe definito in TIMEFRAME_CONFIG
+forecast_locks = {tf: threading.Lock() for tf in TIMEFRAME_CONFIG.keys()}
 
 # --- FUNZIONI DI SUPPORTO ----------------------------------------------------
 
@@ -113,12 +117,19 @@ def job_forecast(pairs, forecaster: TimeSfmForecaster, tf):
 
 def run_forecast_in_background(pairs, forecaster, tf):
     """
-    Wrapper che gestisce il Lock e lancia il job vero e proprio.
+    Wrapper che gestisce il Lock per timeframe e lancia il job vero e proprio.
     """
-    # Tenta di acquisire il lock senza bloccare.
-    # Se è False, significa che un altro forecast è ancora in corso -> SKIP.
-    if not forecast_lock.acquire(blocking=False):
-        print(f"[{datetime.now()}] [WARN] Forecast {tf} SKIPPATO: Il precedente è ancora in esecuzione.")
+    # Recupera (o crea) il lock del timeframe in modo thread-safe
+    with forecast_locks_lock:
+        lock = forecast_locks.get(tf)
+        if lock is None:
+            lock = threading.Lock()
+            forecast_locks[tf] = lock
+
+    # Tenta di acquisire il lock senza bloccare. Se già occupato -> SKIP.
+    acquired = lock.acquire(blocking=False)
+    if not acquired:
+        print(f"[{datetime.now()}] [WARN] Forecast {tf} SKIPPATO: già in esecuzione per questo timeframe.")
         return
 
     try:
@@ -126,7 +137,12 @@ def run_forecast_in_background(pairs, forecaster, tf):
     except Exception as e:
         print(f"[ERR] Errore critico nel thread forecast: {e}")
     finally:
-        forecast_lock.release()
+        if acquired:
+            try:
+                lock.release()
+            except RuntimeError:
+                # In caso di rilascio errato, ignoriamo per non bloccare il loop
+                pass
 
 
 # --- JOB SPECIFICI (5m, 15m, ecc.) ------------------------------------------
@@ -134,7 +150,12 @@ def run_forecast_in_background(pairs, forecaster, tf):
 def job_5m(pairs):
     print(f"[{datetime.now()}] Avvio job_5m...")
     fetch_and_store_for_timeframes(pairs, ["5m", "1m"])
-    print(f"[{datetime.now()}] Fine job_5m.")
+    # Avvia Forecast in BACKGROUND per 5m (non bloccante)
+    print(f"[{datetime.now()}] Avvio Thread Forecast 5m...")
+    t = threading.Thread(target=run_forecast_in_background, args=(pairs, TimeSfmForecaster(), "5m"))
+    t.start()
+
+    print(f"[{datetime.now()}] Fine job_5m (Main Thread libero).")
 
 
 def job_15m(pairs, forecaster):

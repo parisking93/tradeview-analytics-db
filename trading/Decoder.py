@@ -44,6 +44,16 @@ class ActionDecoder:
         # Il modello suggerisce un offset (es. -0.01 = 1% sotto).
         px_offset = heads['price_offset'].item() * 0.05 # Range max +/- 5%
 
+        # --- SAFETY NET per ordini LIMIT ---
+        # Se il modello produce px_offset ~ 0 ma sceglie LIMIT, l'ordine diventa di fatto un MARKET (limit 'marketable').
+        # Qui imponiamo (solo per BUY/SELL) una distanza minima e la direzionalità corretta.
+        MIN_LIMIT_PCT = 0.002  # 0.20% (tuning: 0.001..0.005 in base a spread/volatilità)
+        if ordertype == "LIMIT" and decision in ("BUY", "SELL"):
+            if decision == "BUY" and px_offset > -MIN_LIMIT_PCT:
+                px_offset = -MIN_LIMIT_PCT
+            elif decision == "SELL" and px_offset < MIN_LIMIT_PCT:
+                px_offset = MIN_LIMIT_PCT
+
         if ordertype == "MARKET":
             # Se Market, usiamo il prezzo di riferimento attuale senza modifiche
             limit_price = self.ref_price
@@ -52,6 +62,12 @@ class ActionDecoder:
             # Nota: offset negativo = prezzo più basso (buono per Buy Limit)
             # offset positivo = prezzo più alto (buono per Sell Limit)
             limit_price = self.ref_price * (1.0 + px_offset)
+
+        # Debug opzionale per verifica immediata
+        try:
+            print(f"[DEBUG] {self.pair_name} type={ordertype} side={decision} px_off={px_offset:.5f} ref={self.ref_price} limit={self.ref_price*(1+px_offset):.6f}")
+        except Exception:
+            pass
 
         # Arrotondamento obbligatorio
         limit_price = round(limit_price, self.pair_decimals)

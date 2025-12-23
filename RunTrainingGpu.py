@@ -55,7 +55,7 @@ def to_datetime(ts):
         return None
 
 
-def simulate_pnl_from_preds(preds, current_price, future_segment, fee_rate=0.001):
+def simulate_pnl_from_preds(preds, current_price, future_segment, fee_rate=0.001, verbose=False):
     """
     Validazione rapida PnL (EUR) su un singolo sample.
     Ritorna (pnl, is_trade) dove:
@@ -73,6 +73,14 @@ def simulate_pnl_from_preds(preds, current_price, future_segment, fee_rate=0.001
     if side == 2:
         return 0.0, 0  # HOLD: no trade
 
+    # Determine ordertype and price offset (fill-aware)
+    ordertype = int(torch.argmax(preds.get("ordertype")).item()) if preds.get("ordertype") is not None else 0
+    # price_offset normalized in [-1,1] -> scale to +/-5%
+    try:
+        px_off = float(preds.get("price_offset").clamp(-1.0, 1.0).item()) * 0.05
+    except Exception:
+        px_off = 0.0
+
     entry = float(current_price)
     qty_frac = float(preds["qty"].clamp(0, 1).item())
     lev = float(preds["leverage"].clamp(1, 5).item())
@@ -88,6 +96,53 @@ def simulate_pnl_from_preds(preds, current_price, future_segment, fee_rate=0.001
     tp_pct = max(0.0, min(0.10 * tp_mult, 0.50))
     sl_pct = max(0.0, min(0.05 * sl_mult, 0.50))
 
+    # If LIMIT, compute entry from offset and verify fill on future_segment
+    filled = True
+    px_off_enforced = px_off  # Track whether px_off was clamped
+    if ordertype == 0:  # LIMIT
+        # Enforce directional and distance bounds for realistic LIMIT orders
+        MIN_LIMIT_DIST = 0.002  # 0.2% minimum distance from current price
+        MAX_LIMIT_DIST = 0.05   # 5% maximum distance from current price
+
+        if side == 0:  # BUY
+            # For BUY: limit MUST be below current (px_off < 0)
+            # Clamp to [-MAX, -MIN]
+            px_off_enforced = max(-MAX_LIMIT_DIST, min(px_off, -MIN_LIMIT_DIST))
+            entry = float(current_price) * (1.0 + px_off_enforced)
+
+            # If order became "marketable" (entry >= current), treat as MARKET not LIMIT
+            if entry >= float(current_price):
+                ordertype = 1  # Convert to MARKET
+                entry = float(current_price)
+                filled = True
+            else:
+                # Standard LIMIT fill check: any low <= entry
+                filled = any(float(c["low"]) <= entry for c in future_segment)
+
+        else:  # SELL
+            # For SELL: limit MUST be above current (px_off > 0)
+            # Clamp to [+MIN, +MAX]
+            px_off_enforced = max(MIN_LIMIT_DIST, min(px_off, MAX_LIMIT_DIST))
+            entry = float(current_price) * (1.0 + px_off_enforced)
+
+            # If order became "marketable" (entry <= current), treat as MARKET not LIMIT
+            if entry <= float(current_price):
+                ordertype = 1  # Convert to MARKET
+                entry = float(current_price)
+                filled = True
+            else:
+                # Standard LIMIT fill check: any high >= entry
+                filled = any(float(c["high"]) >= entry for c in future_segment)
+
+        if not filled:
+            # LIMIT not touched -> no trade executed in validation
+            if verbose:
+                side_str = ["BUY", "SELL", "HOLD"][side]
+                ord_str = "LIMIT"
+                print(f"[VAL_DBG] side:{side_str} ord:{ord_str} px_off:{px_off:.6f} px_enforced:{px_off_enforced:.6f} ref:{current_price:.5f} limit:{entry:.5f} filled:False")
+            return 0.0, 0
+
+    # Compute TP/SL relative to (possibly adjusted) entry
     if side == 0:  # BUY
         tp = entry * (1.0 + tp_pct)
         sl = entry * (1.0 - sl_pct)
@@ -114,6 +169,12 @@ def simulate_pnl_from_preds(preds, current_price, future_segment, fee_rate=0.001
         raw_ret = (entry - exit_px) / entry
 
     net_ret = raw_ret - 2.0 * fee_rate
+
+    if verbose:
+        side_str = ["BUY", "SELL", "HOLD"][side]
+        ord_str = "MARKET" if ordertype == 1 else "LIMIT"
+        print(f"[VAL_DBG] side:{side_str} ord:{ord_str} px_off:{px_off:.6f} px_enforced:{px_off_enforced:.6f} ref:{current_price:.5f} entry:{entry:.5f} filled:{filled}")
+
     return float(notional * net_ret), 1  # 1 = trade effettuato
 
 def train_loop():
@@ -485,7 +546,7 @@ def train_loop():
                         preds_v = model.get_heads_dict(y_v)
 
                     current_price_v = float(context_v["candles"]["1h"][-1]["close"])
-                    pnl_v, is_trade_v = simulate_pnl_from_preds(preds_v, current_price_v, future_segment_v, fee_rate=0.001)
+                    pnl_v, is_trade_v = simulate_pnl_from_preds(preds_v, current_price_v, future_segment_v, fee_rate=0.001, verbose=True)
                     val_pnls.append(pnl_v)
                     val_trades.append(is_trade_v)
 
@@ -501,7 +562,7 @@ def train_loop():
             trade_freq = total_trades / len(val_pnls)  # Normalizzato: 0-1
 
             # Iperparametri di penalizzazione (tunable)
-            lambda_trade = 0.5   # Penalità PER FREQUENZA TRADING (non assoluto)
+            lambda_trade = 0.7   # Penalità PER FREQUENZA TRADING (non assoluto)
 
             # Score = PnL medio - penalità proporzionale alla frequenza trading
             # Se fai il 100% di trade (1.0), sottrai lambda_trade * 1.0 = 0.5 dal PnL

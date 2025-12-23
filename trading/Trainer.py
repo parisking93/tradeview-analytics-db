@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import torch.nn.functional as F
 import random
 import numpy as np
 from datetime import timedelta, datetime
@@ -52,6 +53,9 @@ class TradingTrainer:
 
         self.loss_mse = nn.MSELoss()
         self.loss_bce = nn.BCELoss()
+        # Counters to compute dynamic class weights for ordertype (0=LIMIT,1=MARKET)
+        # Initialized to 1 to avoid division by zero
+        self.type_counts = [1.0, 1.0]
 
     def generate_fake_order(self, context, pair_limits):
         """
@@ -442,6 +446,17 @@ class TradingTrainer:
                         float(current_price), 0, highs, lows, closes
                     )
 
+                # OPTIONAL: If the computed LIMIT would never be filled in the next candles,
+                # convert target to MARKET to avoid creating unrealistic LIMIT targets.
+                try:
+                    would_fill = any(float(c['low']) <= entry_price for c in future_candles)
+                except Exception:
+                    would_fill = True
+                if not would_fill:
+                    target_ordertype = 1  # MARKET
+                    target_px_offset = 0.0
+                    entry_price = float(current_price)
+
                 # TP/SL e leva DEVONO dipendere dal prezzo di entry
                 best_exit_price = max(highs[:idx_tp_hit+5])
                 pct_gain = (best_exit_price - entry_price) / entry_price if entry_price > 0 else 0.0
@@ -474,6 +489,17 @@ class TradingTrainer:
                     entry_price, target_px_offset = _compute_limit_entry_and_px(
                         float(current_price), 1, highs, lows, closes
                     )
+
+                # OPTIONAL: If the computed LIMIT would never be filled in the next candles,
+                # convert target to MARKET to avoid creating unrealistic LIMIT targets.
+                try:
+                    would_fill = any(float(c['high']) >= entry_price for c in future_candles)
+                except Exception:
+                    would_fill = True
+                if not would_fill:
+                    target_ordertype = 1  # MARKET
+                    target_px_offset = 0.0
+                    entry_price = float(current_price)
 
                 best_low = min(lows)
                 pct_gain = (entry_price - best_low) / entry_price if entry_price > 0 else 0.0
@@ -565,6 +591,7 @@ class TradingTrainer:
 
         # 3. Loss Calcolo MULTISTEP
         is_active = (t_side != 2).float().view(-1, 1)
+        is_limit = (t_type == 0).float().view(-1, 1)  # 0=LIMIT, 1=MARKET (target)
 
         h = None
         sum_w = 0.0
@@ -598,12 +625,29 @@ class TradingTrainer:
             loss_qty_step = (self.loss_mse(preds['qty'], t_qty) * is_active).mean().squeeze()
             loss_tp_step  = (self.loss_mse(preds['tp_mult'], t_tp) * is_active).mean().squeeze()
             loss_sl_step  = (self.loss_mse(preds['sl_mult'], t_sl) * is_active).mean().squeeze()
-            loss_px_step  = (self.loss_mse(preds['price_offset'], t_px) * is_active).mean().squeeze()
+            # Importante: l'offset di prezzo ha senso SOLO quando il target è LIMIT.
+            # Se lo alleni anche su MARKET (dove il target è quasi sempre 0), il modello converge a offset≈0 anche quando sceglie LIMIT.
+            loss_px_step  = (self.loss_mse(preds['price_offset'], t_px) * is_active * is_limit).mean().squeeze()
 
             pred_lev = preds['leverage'].clamp(1.0, 5.0)
             t_lev_c  = t_lev.clamp(1.0, 5.0)
             loss_lev_step = (self.loss_lev(pred_lev, t_lev_c) * is_active).mean().squeeze()  # scalare
-            loss_type_step = self.loss_ce_type(preds['ordertype'], t_type).squeeze()    # scalare
+            # Dynamic weighted CrossEntropy for ordertype to mitigate class imbalance
+            # Update running counts of targets
+            try:
+                t_type_flat = t_type.view(-1)
+                t_type_item = int(t_type_flat[0].item())
+                if t_type_item in (0, 1):
+                    self.type_counts[t_type_item] += 1.0
+            except Exception:
+                pass
+
+            # Compute weight: give MARKET (idx=1) weight proportional to n_limit/n_market
+            w_market = float(self.type_counts[0] / (self.type_counts[1] + 1e-6))
+            w_market = max(0.1, min(w_market, 10.0))
+            weight_tensor = torch.tensor([1.0, w_market], device=device)
+
+            loss_type_step = F.cross_entropy(preds['ordertype'], t_type.view(-1), weight=weight_tensor).squeeze()
             # loss_halt_step = self.loss_bce(preds['halt_prob'], t_halt).squeeze()        # scalare
 
             # ---- HALT focal BCE (stabile su class imbalance) ----
@@ -684,8 +728,8 @@ class TradingTrainer:
             self.optimizer.step()
             self.optimizer.zero_grad()  # Resetta ORA, dopo l'update
 
-            # Aggiorna scheduler (opzionale farlo qui o a fine epoca)
-            self.scheduler.step(total_loss)
+            # Aggiorna scheduler con loss scalare (detached) per evitare warning ReduceLROnPlateau
+            self.scheduler.step(total_loss.detach().item())
 
         # === CALCOLO DINAMICO DEL WALLET ===
         # Aggiorna simulated_wallet in base alle azioni predette dal modello

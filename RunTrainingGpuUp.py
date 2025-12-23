@@ -506,6 +506,7 @@ def train_loop():
                 best_penalized_score = penalized_score
                 trainer.save_checkpoint("trainerUpPnl.pth")
             else:
+                trainer.save_checkpoint("trainerUpN.pth")
                 print(f"--- Nessun miglioramento SCORE (Best: {best_penalized_score:.4f}) ---")
 
         db.close_connection()
