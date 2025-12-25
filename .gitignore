@@ -28,5 +28,9 @@ dist-ssr
 .venv_amd_therock
 .pth
 models
+model
 .json
 __pycache__
+tools
+tests
+.agent

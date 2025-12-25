@@ -11,14 +11,14 @@ def _parse_timestamp(ts):
     if isinstance(ts, datetime):
         return ts
     if ts is None:
-        return datetime.min
+        return datetime(1971, 1, 1) # Windows-safe fallback (after 1970)
     try:
         return datetime.strptime(str(ts), "%Y-%m-%d %H:%M:%S")
     except:
         try:
             return datetime.strptime(str(ts), "%Y-%m-%dT%H:%M:%S")
         except:
-            return datetime.min
+            return datetime(1971, 1, 1)
 
 @dataclass
 class VectorizerConfig:
@@ -191,8 +191,8 @@ class DataVectorizer:
         # --- 2. Forecast (Sequence) ---
         fc_data = []
         if forecast_db_data:
-            # FIX: Use numeric timestamp comparison instead of string to avoid lexical sorting issues
-            sorted_fc = sorted(forecast_db_data, key=lambda x: _parse_timestamp(x.get('timestamp') or x.get('timestamp_dt')).timestamp())
+            # FIX: Use datetime objects directly for sorting; .timestamp() can fail on Windows for old dates
+            sorted_fc = sorted(forecast_db_data, key=lambda x: _parse_timestamp(x.get('timestamp') or x.get('timestamp_dt')))
             for row in sorted_fc:
                 vec = self._vectorize_row(
                     row,

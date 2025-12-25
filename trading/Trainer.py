@@ -1,4 +1,5 @@
 import torch
+import os
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
@@ -6,6 +7,7 @@ import random
 import numpy as np
 import zlib
 from datetime import timedelta, datetime
+from trading.RLReward import PnlRewardManager
 
 class TradingTrainer:
     def __init__(self, model, db_manager, vectorizer, learning_rate=2e-5):
@@ -21,13 +23,19 @@ class TradingTrainer:
 
         # --- SIDE Focal Tuning ---
         self.side_gamma = 2.0
-        self.side_weights = torch.tensor([1.2, 1.2, 1.0]) # Ribilanciato: meno aggressivo sui trade per evitare over-trading
+        self.side_weights = torch.tensor([1.2, 1.2, 1.0]) # Ribilanciato: meno aggressivo sui trade
+        # --- RL Reward Manager ---
+        # NOTE: Se noti che il modello diventa troppo aggressivo o troppo timido, puoi regolare il peso del RL.
+        # - Aumentalo (es. 1.0) per dare più importanza al profitto simulato.
+        # - Abbassalo (es. 0.2) per rimanere più fedele ai dati storici dell'oracolo.
+        self.reward_manager = PnlRewardManager()
+        self.rl_weight = 0.5 # Peso della loss RL rispetto alla supervisionata
 
 
         # Carica pesi (Best effort)
         try:
         #     self.model.load_state_dict(torch.load("trm_model_v2.pth"), strict=False)
-            self.model.load_state_dict(torch.load("model/trainerLast.pth"), strict=False)
+            self.model.load_state_dict(torch.load("model/trainerBest.pth"), strict=False)
             print("--- Pesi 'Best Model' caricati ---")
         except:
             print("--- Nessun peso precedente, start fresh ---")
@@ -639,6 +647,7 @@ class TradingTrainer:
         acc_loss_lev  = torch.tensor(0.0, device=device)
         acc_loss_type = torch.tensor(0.0, device=device)
         acc_loss_halt = torch.tensor(0.0, device=device)
+        acc_loss_rl   = torch.tensor(0.0, device=device)
 
         last_preds = None
 
@@ -689,41 +698,40 @@ class TradingTrainer:
             weight_tensor = torch.tensor([1.0, w_market], device=device)
 
             loss_type_step = F.cross_entropy(preds['ordertype'], t_type.view(-1), weight=weight_tensor).squeeze()
-            # loss_halt_step = self.loss_bce(preds['halt_prob'], t_halt).squeeze()        # scalare
 
             # ---- HALT focal BCE (stabile su class imbalance) ----
             p = preds['halt_prob'].clamp(1e-4, 1.0 - 1e-4)   # evita log(0)
             # ---- HALT target schedule per-step ----
-            # Allinea il training al "thinking loop": primi step => target halt più basso (spinge a pensare),
-            # ultimi step => converge al target finale (HOLD alto / TRADE basso).
             t_final = t_halt.float()  # ~0.95 (HOLD) o ~0.05 (trade)
-
             progress = float(s + 1) / float(self.thinking_steps)  # 0..1
             HALT_START_HOLD = 0.20
             HALT_START_TRADE = 0.02
-
             t_start = torch.where(
                 t_final >= 0.5,
                 torch.full_like(t_final, HALT_START_HOLD),
                 torch.full_like(t_final, HALT_START_TRADE)
             )
-
             t = (t_start + (t_final - t_start) * progress).clamp(0.0, 1.0)
-            # BCE per-sample
             bce = -(t * torch.log(p) + (1.0 - t) * torch.log(1.0 - p))
-
-            # pt = prob della classe corretta
             pt = torch.where(t >= 0.5, p, 1.0 - p)
-
-            # alpha bilanciato (HOLD vs non-HOLD)
             alpha = torch.where(t >= 0.5,
                                 torch.full_like(t, self.halt_alpha_pos),
                                 torch.full_like(t, self.halt_alpha_neg))
-
             loss_halt_step = (alpha * (1.0 - pt) ** self.halt_gamma * bce).mean()
-
-            # scala (così halt non domina side/qty ecc.)
             loss_halt_step = self.halt_loss_weight * loss_halt_step
+
+            # ---- RL REWARD CALCULATION ----
+            # Calcoliamo un reward basato sulla coerenza con il target oracle (proxy di profitto futuro)
+            # In futuro questo userà il PnL simulato reale.
+            with torch.no_grad():
+                pred_side_idx = torch.argmax(preds['side'], dim=-1)
+                # Reward positivo se azzecca il side, negativo altrimenti
+                step_reward = torch.where(pred_side_idx == t_side, 1.0, -1.0)
+
+            # Aggiungiamo una loss di policy: minimizziamo -reward * log_prob
+            log_probs = F.log_softmax(preds['side'], dim=-1)
+            picked_log_probs = log_probs.gather(1, pred_side_idx.view(-1, 1)).view(-1)
+            loss_rl_step = -(step_reward * picked_log_probs).mean()
 
             # Accumulo pesato
             acc_loss_side = acc_loss_side + (w * loss_side_step)
@@ -734,6 +742,7 @@ class TradingTrainer:
             acc_loss_lev  = acc_loss_lev  + (w * loss_lev_step)
             acc_loss_type = acc_loss_type + (w * loss_type_step)
             acc_loss_halt = acc_loss_halt + (w * loss_halt_step)
+            acc_loss_rl   = acc_loss_rl   + (w * loss_rl_step)
 
         # Media pesata tra gli step
         loss_side = acc_loss_side / sum_w
@@ -744,6 +753,7 @@ class TradingTrainer:
         loss_lev  = acc_loss_lev  / sum_w
         loss_type = acc_loss_type / sum_w
         loss_halt = acc_loss_halt / sum_w
+        loss_rl   = acc_loss_rl   / sum_w
 
         # 4. Loss totale (stessi pesi di prima)
         # 4. Loss totale (Ribilanciata per evitare dominanza MSE)
@@ -755,7 +765,8 @@ class TradingTrainer:
             0.2 * loss_lev +
             0.3 * loss_type +
             0.1 * loss_px +
-            0.4 * loss_halt
+            0.4 * loss_halt +
+            self.rl_weight * loss_rl
         )
 
         # --- GESTIONE GRADIENT ACCUMULATION ---
@@ -835,6 +846,7 @@ class TradingTrainer:
             "loss_lev": loss_lev.item(),
             "loss_type": loss_type.item(),
             "loss_halt": loss_halt.item(),
+            "loss_rl": loss_rl.item(),
             "target_side": t_side.item(),
             "pred_side": torch.argmax(last_preds['side']).item() if last_preds is not None else -1,
             "simulated_wallet": updated_wallet
@@ -842,10 +854,12 @@ class TradingTrainer:
 
         # --- RIPRISTINO STATO RNG ---
         # Cruciale: ripristiniamo lo stato RNG per non corrompere random.shuffle() nel loop principale
-        random.setstate(_rng_state_backup)
+        if hasattr(self, '_rng_state_backup'):
+            random.setstate(self._rng_state_backup)
 
         return result
 
     def save_checkpoint(self, path="model/model_checkpoint.pth"):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
         torch.save(self.model.state_dict(), path)
         # print(f"--- Saved {path} ---")

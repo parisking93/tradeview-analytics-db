@@ -354,7 +354,7 @@ def train_loop():
                 if global_step % 10 == 0:
                     side_str = ["BUY", "SELL", "HOLD"][metrics['target_side']]
                     pred_str = ["BUY", "SELL", "HOLD"][metrics['pred_side']]
-                    print(f"[Ep {epoch+1}][Step {global_step}] {pair_name} | Loss: {loss:.4f} (Avg: {moving_avg_loss:.4f}) | T: {side_str} vs P: {pred_str}")
+                    print(f"[Ep {epoch+1}][Step {global_step}] {pair_name} | Loss: {loss:.4f} (Avg: {moving_avg_loss:.4f}) | RL Loss: {metrics.get('loss_rl', 0):.4f} | T: {side_str} vs P: {pred_str}")
 
 
         # === FINE EPOCA ===

@@ -3,8 +3,10 @@ import torch.nn as nn
 import torch.optim as optim
 import random
 import zlib
+import os
 import numpy as np
 from datetime import timedelta, datetime
+from trading.RLReward import PnlRewardManager
 
 class TradingTrainer:
     def __init__(self, model, db_manager, vectorizer, learning_rate=2e-5):
@@ -17,6 +19,10 @@ class TradingTrainer:
         self.halt_alpha_pos = 0.6      # peso quando target_halt ~ 1 (HOLD)
         self.halt_alpha_neg = 0.4      # peso quando target_halt ~ 0 (BUY/SELL)
         self.halt_loss_weight = 0.6    # quanto pesa halt nella loss totale
+
+        # --- RL Reward Manager ---
+        self.reward_manager = PnlRewardManager()
+        self.rl_weight = 0.5 # Peso della loss RL rispetto alla supervisionata
 
 
         # Carica pesi (Best effort)
@@ -497,6 +503,7 @@ class TradingTrainer:
         acc_loss_lev  = torch.tensor(0.0, device=device)
         acc_loss_type = torch.tensor(0.0, device=device)
         acc_loss_halt = torch.tensor(0.0, device=device)
+        acc_loss_rl   = torch.tensor(0.0, device=device)
 
         last_preds = None
 
@@ -567,6 +574,16 @@ class TradingTrainer:
             acc_loss_type = acc_loss_type + (w * loss_type_step)
             acc_loss_halt = acc_loss_halt + (w * loss_halt_step)
 
+            # ---- RL REWARD CALCULATION ----
+            with torch.no_grad():
+                pred_side_idx = torch.argmax(preds['side'], dim=-1)
+                step_reward = torch.where(pred_side_idx == t_side, 1.0, -1.0)
+
+            log_probs = F.log_softmax(preds['side'], dim=-1)
+            picked_log_probs = log_probs.gather(1, pred_side_idx.view(-1, 1)).view(-1)
+            loss_rl_step = -(step_reward * picked_log_probs).mean()
+            acc_loss_rl = acc_loss_rl + (w * loss_rl_step)
+
         # Media pesata tra gli step
         loss_side = acc_loss_side / sum_w
         loss_qty  = acc_loss_qty  / sum_w
@@ -576,6 +593,7 @@ class TradingTrainer:
         loss_lev  = acc_loss_lev  / sum_w
         loss_type = acc_loss_type / sum_w
         loss_halt = acc_loss_halt / sum_w
+        loss_rl   = acc_loss_rl   / sum_w
 
         # 4. Loss totale (stessi pesi di prima)
         total_loss = (
@@ -586,7 +604,8 @@ class TradingTrainer:
             0.3 * loss_lev +
             0.3 * loss_type +  # peso leggermente maggiore per ordertype
             0.1 * loss_px +
-            0.4 * loss_halt
+            0.4 * loss_halt +
+            self.rl_weight * loss_rl
         )
 
         # --- GESTIONE GRADIENT ACCUMULATION ---
@@ -604,6 +623,7 @@ class TradingTrainer:
 
         result = {
             "loss": total_loss.item(),
+            "loss_rl": loss_rl.item(),
             "target_side": t_side.item(),
             "pred_side": torch.argmax(last_preds['side']).item() if last_preds is not None else -1
         }
@@ -613,6 +633,7 @@ class TradingTrainer:
 
         return result
 
-    def save_checkpoint(self, path="model/model_checkpoint.pth"):
+    def save_checkpoint(self, path="model/trainerUpN.pth"):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
         torch.save(self.model.state_dict(), path)
         # print(f"--- Saved {path} ---")

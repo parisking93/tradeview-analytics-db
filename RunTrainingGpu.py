@@ -444,7 +444,7 @@ def train_loop():
                     side_str = ["BUY", "SELL", "HOLD"][metrics['target_side']]
                     pred_str = ["BUY", "SELL", "HOLD"][metrics['pred_side']]
                     # Loggare le loss per head
-                    print(f"[Ep {epoch+1}][Step {global_step}] {pair_name} | Loss: {loss:.4f} (Avg: {moving_avg_loss:.4f}) | T: {side_str} vs P: {pred_str}")
+                    print(f"[Ep {epoch+1}][Step {global_step}] {pair_name} | Loss: {loss:.4f} (Avg: {moving_avg_loss:.4f}) | RL Loss: {metrics.get('loss_rl', 0):.4f} | T: {side_str} vs P: {pred_str}")
                     print(f"  ├─ side:{metrics.get('loss_side', 0):.4f} | type:{metrics.get('loss_type', 0):.4f} | qty:{metrics.get('loss_qty', 0):.4f} | px:{metrics.get('loss_px', 0):.4f}")
                     print(f"  └─ tp:{metrics.get('loss_tp', 0):.4f} | sl:{metrics.get('loss_sl', 0):.4f} | lev:{metrics.get('loss_lev', 0):.4f} | halt:{metrics.get('loss_halt', 0):.4f}")
 
