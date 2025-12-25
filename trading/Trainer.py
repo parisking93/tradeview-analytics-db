@@ -4,25 +4,30 @@ import torch.optim as optim
 import torch.nn.functional as F
 import random
 import numpy as np
+import zlib
 from datetime import timedelta, datetime
 
 class TradingTrainer:
-    def __init__(self, model, db_manager, vectorizer, learning_rate=1e-4):
+    def __init__(self, model, db_manager, vectorizer, learning_rate=2e-5):
         self.model = model
         self.db = db_manager
         self.vectorizer = vectorizer
 
         # --- HALT tuning ---
-        self.halt_gamma = 2.0          # focal gamma
-        self.halt_alpha_pos = 0.75     # peso quando target_halt ~ 1 (HOLD)
-        self.halt_alpha_neg = 0.25     # peso quando target_halt ~ 0 (BUY/SELL)
-        self.halt_loss_weight = 0.35   # quanto pesa halt nella loss totale (prova 0.25–0.50)
+        self.halt_gamma = 2.0
+        self.halt_alpha_pos = 0.6  # Meno aggressivo su HOLD
+        self.halt_alpha_neg = 0.4  # Più peso ai trade quando sono reali
+        self.halt_loss_weight = 0.6 # Aumentato peso per forzare il modello a decidere meglio se stare fermo
+
+        # --- SIDE Focal Tuning ---
+        self.side_gamma = 2.0
+        self.side_weights = torch.tensor([1.2, 1.2, 1.0]) # Ribilanciato: meno aggressivo sui trade per evitare over-trading
 
 
         # Carica pesi (Best effort)
         try:
         #     self.model.load_state_dict(torch.load("trm_model_v2.pth"), strict=False)
-            # self.model.load_state_dict(torch.load("trm_model_best.pth"), strict=False)
+            self.model.load_state_dict(torch.load("model/trainerLast.pth"), strict=False)
             print("--- Pesi 'Best Model' caricati ---")
         except:
             print("--- Nessun peso precedente, start fresh ---")
@@ -31,20 +36,18 @@ class TradingTrainer:
 
         # --- SCHEDULER ---
         self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-            self.optimizer, mode='min', factor=0.5, patience=500
+            self.optimizer, mode='min', factor=0.5, patience=50
         )
-        self.accumulation_steps = 4
+        self.accumulation_steps = 8 # Aumentato per gradienti più stabili (batch virtuale più grande)
 
         # --- MULTISTEP THINKING ---
         # Numero di step di "pensiero" durante il training (unroll della GRUCell del cervello)
-        self.thinking_steps = 7  # puoi portarlo a 6 se vuoi avvicinarti al runGoogle
+        self.thinking_steps = 5  # Ridotto da 7 per stabilità gradienti
 
         # --- LOSS FUNCTIONS SEPARATE ---
 
-        # 1. Loss per il SIDE (3 classi: Buy, Sell, Hold)
-        # Qui USIAMO i pesi per bilanciare l'Hold
-        self.weights_side = torch.tensor([2.7, 2.7, 1.0])
-        self.loss_ce_side = nn.CrossEntropyLoss(weight=self.weights_side)
+        # 1. Loss per il SIDE (Focal Loss custom in train_step)
+        self.loss_ce_side_raw = nn.CrossEntropyLoss(reduction='none')
         self.loss_lev = torch.nn.SmoothL1Loss(reduction='none')
 
         # 2. Loss per ORDER TYPE (2 classi: Limit, Market)
@@ -334,26 +337,14 @@ class TradingTrainer:
                     "halt_prob": torch.tensor([1.0], dtype=torch.float32).view(-1, 1)
                 }
 
-            # --- 2. ANALISI MERCATO ---
-            MIN_PROFIT_PCT = 0.016
-            MAX_STOP_LOSS_TOLERANCE = 0.020
+            # --- 2. ANALISI MERCATO (LOGICA AVANZATA) ---
+            MIN_PROFIT_PCT = 0.02
+            MAX_STOP_LOSS_TOLERANCE = 0.03
             RISK_PER_TRADE = 0.02
 
-            highs = [c['high'] for c in future_candles]
-            lows = [c['low'] for c in future_candles]
-            closes = [c['close'] for c in future_candles]
-
-            # Default: HOLD
-            target_side = 2
-            target_qty = 0.0
-            target_tp_mult = 0.0
-            target_sl_mult = 0.0
-            target_ordertype = 0
-            target_leverage = 1.0
-            target_halt = 0.95
-
-            # Target per offset di prezzo (solo per LIMIT)
-            target_px_offset = 0.0
+            highs = [float(c['high']) for c in future_candles]
+            lows = [float(c['low']) for c in future_candles]
+            closes = [float(c['close']) for c in future_candles]
 
             def _clamp(v, lo, hi):
                 return max(lo, min(hi, v))
@@ -419,6 +410,21 @@ class TradingTrainer:
                 px_norm = _clamp(raw_offset / PX_MAX_PCT, -1.0, 1.0)
                 return float(entry), float(px_norm)
 
+            # Default: HOLD
+            target_side = 2
+            target_qty = 0.0
+            target_tp_mult = 0.0
+            target_sl_mult = 0.0
+            target_px_offset = 0.0
+            target_ordertype = 1
+            target_leverage = 1.0
+            target_halt = 0.95
+
+            # Calcola ATR% per soglia dinamica MARKET/LIMIT (si adatta alla volatilità della currency)
+            atr_pct_global = _estimate_atr_pct(highs[:8], lows[:8], closes[:8])
+            # Soglia: se il prezzo si muove più di ~30% dell'ATR, entriamo MARKET
+            market_threshold = 0.3 * atr_pct_global
+
             # --- LOGICA BUY ---
             sl_threshold_price = current_price * (1 - MAX_STOP_LOSS_TOLERANCE)
             tp_threshold_price = current_price * (1 + MIN_PROFIT_PCT)
@@ -435,8 +441,9 @@ class TradingTrainer:
                 target_side = 0
                 target_qty = 0.95
 
-                # Se la prima candela futura è già "molto sopra" -> entra market, altrimenti prova limit su supporto
-                if (closes[0] - current_price)/current_price > 0.003:
+                # Se il prezzo si muove significativamente -> entra market, altrimenti prova limit su supporto
+                # Soglia dinamica basata su ATR% della currency
+                if (closes[4] - current_price)/current_price > market_threshold:
                     target_ordertype = 1  # MARKET
                     entry_price = float(current_price)
                     target_px_offset = 0.0
@@ -479,8 +486,9 @@ class TradingTrainer:
                 target_side = 1
                 target_qty = 0.95
 
-                # Se la prima candela futura è già "molto sotto" -> entra market, altrimenti prova limit su resistenza
-                if (current_price - closes[0]) / current_price > 0.003:
+                # Se il prezzo si muove significativamente -> entra market, altrimenti prova limit su resistenza
+                # Soglia dinamica basata su ATR% della currency
+                if (current_price - closes[4]) / current_price > market_threshold:
                     target_ordertype = 1  # MARKET
                     entry_price = float(current_price)
                     target_px_offset = 0.0
@@ -516,8 +524,12 @@ class TradingTrainer:
                 target_leverage = safe_lev
                 target_halt = 0.05
 
-            target_tp_mult = max(0.1, min(target_tp_mult, 5.0))
-            target_sl_mult = max(0.1, min(target_sl_mult, 5.0))
+            # Ensure TP/SL targets result in at least MIN_TP/SL when decoded
+            # Decoder uses pct = mult * 0.10 for TP, mult * 0.05 for SL
+            # MIN_TP_PCT = 0.004 -> min_mult = 0.04
+            # MIN_SL_PCT = 0.003 -> min_mult = 0.06
+            target_tp_mult = max(0.04, min(target_tp_mult, 5.0))
+            target_sl_mult = max(0.06, min(target_sl_mult, 5.0))
 
             return {
                 "side": torch.tensor([target_side], dtype=torch.long),
@@ -530,9 +542,28 @@ class TradingTrainer:
                 "halt_prob": torch.tensor([target_halt], dtype=torch.float32).view(-1, 1)
             }
 
+
     def train_step(self, context, pair_limits, future_candles, current_step_idx, wallet = False, wallet_budget = 0):
         self.model.train()
-        # NOTA: Non azzeriamo i gradienti qui! Lo facciamo solo dopo l'accumulo.
+
+        # --- BACKUP STATO RNG ---
+        # IMPORTANTE: Salviamo lo stato RNG globale PRIMA di seedare,
+        # poi lo ripristiniamo alla fine per non corrompere random.shuffle() nel training loop.
+        self._rng_state_backup = random.getstate()
+
+        # --- DETERMINISTIC SEEDING ---
+        # Per ridurre il noise nelle label, usiamo un seed fisso per questo sample.
+        try:
+            pivot_candle = context['candles']['5m'][-1]
+            ts_str = str(pivot_candle.get('timestamp_dt') or pivot_candle.get('timestamp'))
+            pair_name = str(pair_limits.get('pair', 'unk'))
+
+            # Seed STABILE cross-run (zlib.adler32 è deterministico, hash() di Python no)
+            unique_str = f"{pair_name}_{ts_str}"
+            seed_val = zlib.adler32(unique_str.encode("utf-8")) & 0xffffffff
+            random.seed(seed_val)
+        except Exception:
+            pass
 
         # 0. Generazione Ordini Finti (Augmentation)
         # Se non c'è un ordine, proviamo a generarne uno finto per insegnare al modello a gestire posizioni aperte
@@ -559,12 +590,15 @@ class TradingTrainer:
         )
 
         device = next(self.model.parameters()).device
-        # Assegniamo i pesi solo alla loss del Side
-        if self.loss_ce_side.weight.device != device:
-             self.loss_ce_side.weight = self.weights_side.to(device)
-
         for k, v in inputs.items():
             inputs[k] = v.to(device)
+
+        # 1. Estrazione Context (Transformer) - Run ONCE
+        brain_input = self.model.extract_features(inputs)
+
+        # Assegniamo i pesi focal
+        if self.side_weights.device != device:
+             self.side_weights = self.side_weights.to(device)
 
         # 2. Labeling (come prima, targets una volta sola)
         current_close = context['candles']['5m'][-1]['close']
@@ -613,13 +647,20 @@ class TradingTrainer:
             w = float(s + 1) / float(self.thinking_steps)
             sum_w += w
 
-            # Forward con memoria ricorrente del cervello centrale
-            y, h = self.model(inputs, h)
+            # Forward step ricorrente del cervello centrale
+            y, h = self.model.think(brain_input, h)
             preds = self.model.get_heads_dict(y)
-            last_preds = preds  # per logging a fine funzione
+            last_preds = preds
 
-            # Loss per questo step (stessa logica di prima)
-            loss_side_step = self.loss_ce_side(preds['side'], t_side).squeeze()
+            # --- SIDE Focal Loss (per-sample) ---
+            ce_side = self.loss_ce_side_raw(preds['side'], t_side) # [B]
+            probs_side = torch.softmax(preds['side'], dim=-1)
+            # px = probabilità assegnata alla classe target
+            px_side = probs_side.gather(1, t_side.view(-1, 1)).view(-1)
+            # alpha bilanciato per classe
+            alpha_side = self.side_weights.gather(0, t_side)
+            # Focal formula
+            loss_side_step = (alpha_side * (1.0 - px_side) ** self.side_gamma * ce_side).mean()
 
             # queste hanno mask is_active -> diventano [B,1], le riduciamo con mean()
             loss_qty_step = (self.loss_mse(preds['qty'], t_qty) * is_active).mean().squeeze()
@@ -705,13 +746,14 @@ class TradingTrainer:
         loss_halt = acc_loss_halt / sum_w
 
         # 4. Loss totale (stessi pesi di prima)
+        # 4. Loss totale (Ribilanciata per evitare dominanza MSE)
         total_loss = (
-            3.0 * loss_side +
-            1.0 * loss_qty +
-            0.5 * loss_tp +
-            0.5 * loss_sl +
-            0.3 * loss_lev +
-            0.3 * loss_type +  # peso leggermente maggiore per ordertype
+            4.0 * loss_side +  # Aumentato da 3.0
+            0.3 * loss_qty +   # Ridotto da 1.0
+            0.2 * loss_tp +    # Ridotto da 0.5
+            0.2 * loss_sl +    # Ridotto da 0.5
+            0.2 * loss_lev +
+            0.3 * loss_type +
             0.1 * loss_px +
             0.4 * loss_halt
         )
@@ -727,9 +769,8 @@ class TradingTrainer:
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
             self.optimizer.step()
             self.optimizer.zero_grad()  # Resetta ORA, dopo l'update
-
-            # Aggiorna scheduler con loss scalare (detached) per evitare warning ReduceLROnPlateau
-            self.scheduler.step(total_loss.detach().item())
+            # NOTA: Lo scheduler viene ora chiamato a fine epoca in RunTrainingGpu.py
+            # con la media della loss dell'epoca, NON qui per singolo sample.
 
         # === CALCOLO DINAMICO DEL WALLET ===
         # Aggiorna simulated_wallet in base alle azioni predette dal modello
@@ -799,6 +840,12 @@ class TradingTrainer:
             "simulated_wallet": updated_wallet
         }
 
-    def save_checkpoint(self, path="model_checkpoint.pth"):
+        # --- RIPRISTINO STATO RNG ---
+        # Cruciale: ripristiniamo lo stato RNG per non corrompere random.shuffle() nel loop principale
+        random.setstate(_rng_state_backup)
+
+        return result
+
+    def save_checkpoint(self, path="model/model_checkpoint.pth"):
         torch.save(self.model.state_dict(), path)
         # print(f"--- Saved {path} ---")

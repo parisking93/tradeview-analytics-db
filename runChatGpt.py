@@ -37,8 +37,8 @@ TF_CONFIG_LOW = {
 }
 
 # File dei pesi (uno per cervello)
-MODEL_PATH_HIGH = "trm_model_best.pth"
-MODEL_PATH_LOW = "trm_model_best_long.pth"
+MODEL_PATH_HIGH = "model/trm_model_best.pth"
+MODEL_PATH_LOW = "model/trm_model_best_long.pth"
 
 # Parametri del thinking loop (ACT)
 THINKING_STEPS_HIGH = 6

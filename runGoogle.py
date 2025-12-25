@@ -20,8 +20,8 @@ from trading.KrakenOrderRunner import KrakenOrderRunner
 # ==============================================================================
 
 # File dei pesi
-MODEL_PATH_HIGH = "trainerUpPnl.pth"
-MODEL_PATH_LOW  = "trainerBestonReview.pth"
+MODEL_PATH_HIGH = "model/trainerUpPnl.pth"
+MODEL_PATH_LOW  = "model/trainerBest.pth"
 
 # Configurazione Timeframe
 TF_CONFIG_HIGH = {"1d": 30, "4h": 50, "1h": 100}

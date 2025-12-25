@@ -6,6 +6,20 @@ from datetime import datetime
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Any
 
+def _parse_timestamp(ts):
+    """Helper per convertire timestamp in datetime per comparazione."""
+    if isinstance(ts, datetime):
+        return ts
+    if ts is None:
+        return datetime.min
+    try:
+        return datetime.strptime(str(ts), "%Y-%m-%d %H:%M:%S")
+    except:
+        try:
+            return datetime.strptime(str(ts), "%Y-%m-%dT%H:%M:%S")
+        except:
+            return datetime.min
+
 @dataclass
 class VectorizerConfig:
     # Definizione dinamica: { "1d": 10, "4h": 15, "1h": 20 }
@@ -138,17 +152,23 @@ class DataVectorizer:
         output = {}
 
         # --- Prezzo di Riferimento ---
+        # IMPORTANTE: Deve essere il CLOSE più recente (pivot), non il più vecchio!
         ref_price = 1.0
         shortest_tf = list(self.cfg.candle_history_config.keys())[-1]
-        if candles_db_data.get(shortest_tf):
-            ref_price = self._safe_float(candles_db_data[shortest_tf][0].get('close'))
+        rows_short = candles_db_data.get(shortest_tf, [])
+        if rows_short:
+            # Ordina per timestamp per trovare la candela più recente (indipendente da input order)
+            sorted_short = sorted(rows_short, key=lambda c: _parse_timestamp(c.get('timestamp') or c.get('timestamp_dt')))
+            ref_price = self._safe_float(sorted_short[-1].get('close'))
             if ref_price <= 0: ref_price = 1.0
 
         # --- 1. Candele Storiche (Sequence) ---
         for tf, count in self.cfg.candle_history_config.items():
             raw_rows = candles_db_data.get(tf, [])
-            needed_rows = raw_rows[:count]
-            ordered_rows = needed_rows[::-1]
+            # IMPORTANTE: Ordina sempre oldest->newest per coerenza con x[:, -1, :]
+            sorted_rows = sorted(raw_rows, key=lambda c: _parse_timestamp(c.get('timestamp') or c.get('timestamp_dt')))
+            # Prendi gli ultimi count elementi (più recenti)
+            ordered_rows = sorted_rows[-count:] if len(sorted_rows) >= count else sorted_rows
 
             seq_data = []
             padding_needed = count - len(ordered_rows)
@@ -171,7 +191,8 @@ class DataVectorizer:
         # --- 2. Forecast (Sequence) ---
         fc_data = []
         if forecast_db_data:
-            sorted_fc = sorted(forecast_db_data, key=lambda x: str(x.get('timestamp')))
+            # FIX: Use numeric timestamp comparison instead of string to avoid lexical sorting issues
+            sorted_fc = sorted(forecast_db_data, key=lambda x: _parse_timestamp(x.get('timestamp') or x.get('timestamp_dt')).timestamp())
             for row in sorted_fc:
                 vec = self._vectorize_row(
                     row,

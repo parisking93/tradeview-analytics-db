@@ -35,10 +35,9 @@ class ActionDecoder:
         decision = side_map[side_idx]
         confidence = probs[side_idx].item()
 
-        # --- 2. ORDER TYPE ---
         # 0 = LIMIT, 1 = MARKET
         ordertype_idx = torch.argmax(heads['ordertype'][0]).item()
-        ordertype = "LIMIT" if ordertype_idx == 0 else "MARKET"
+        ordertype = "limit" if ordertype_idx == 0 else "market"
 
         # --- 3. PREZZO (Limit vs Market) ---
         # Il modello suggerisce un offset (es. -0.01 = 1% sotto).
@@ -47,14 +46,14 @@ class ActionDecoder:
         # --- SAFETY NET per ordini LIMIT ---
         # Se il modello produce px_offset ~ 0 ma sceglie LIMIT, l'ordine diventa di fatto un MARKET (limit 'marketable').
         # Qui imponiamo (solo per BUY/SELL) una distanza minima e la direzionalità corretta.
-        MIN_LIMIT_PCT = 0.002  # 0.20% (tuning: 0.001..0.005 in base a spread/volatilità)
-        if ordertype == "LIMIT" and decision in ("BUY", "SELL"):
+        MIN_LIMIT_PCT = 0.002  # 0.20%
+        if ordertype == "limit" and decision in ("BUY", "SELL"):
             if decision == "BUY" and px_offset > -MIN_LIMIT_PCT:
                 px_offset = -MIN_LIMIT_PCT
             elif decision == "SELL" and px_offset < MIN_LIMIT_PCT:
                 px_offset = MIN_LIMIT_PCT
 
-        if ordertype == "MARKET":
+        if ordertype == "market":
             # Se Market, usiamo il prezzo di riferimento attuale senza modifiche
             limit_price = self.ref_price
         else:
@@ -64,10 +63,10 @@ class ActionDecoder:
             limit_price = self.ref_price * (1.0 + px_offset)
 
         # Debug opzionale per verifica immediata
-        try:
-            print(f"[DEBUG] {self.pair_name} type={ordertype} side={decision} px_off={px_offset:.5f} ref={self.ref_price} limit={self.ref_price*(1+px_offset):.6f}")
-        except Exception:
-            pass
+        # try:
+        #     print(f"[DEBUG] {self.pair_name} type={ordertype} side={decision} px_off={px_offset:.5f} ref={self.ref_price} limit={self.ref_price*(1+px_offset):.6f}")
+        # except Exception:
+        #     pass
 
         # Arrotondamento obbligatorio
         limit_price = round(limit_price, self.pair_decimals)
@@ -100,8 +99,15 @@ class ActionDecoder:
 
         # --- 6. TAKE PROFIT & STOP LOSS ---
         # Calcolati a partire dal prezzo di esecuzione (limit_price)
-        tp_dist = heads['tp_mult'].item() * 0.10 # Max 10%
-        sl_dist = heads['sl_mult'].item() * 0.05 # Max 5%
+        # Scaling coerente con Trainer: tp_mult * 0.10, sl_mult * 0.05
+        tp_dist = heads['tp_mult'].item() * 0.10
+        sl_dist = heads['sl_mult'].item() * 0.05
+
+        # Clamps minimi coerenti con Trainer
+        MIN_TP_PCT = 0.004 # 0.4%
+        MIN_SL_PCT = 0.003 # 0.3%
+        tp_dist = max(MIN_TP_PCT, min(tp_dist, 0.50))
+        sl_dist = max(MIN_SL_PCT, min(sl_dist, 0.50))
 
         take_profit = 0.0
         stop_loss = 0.0
@@ -143,7 +149,7 @@ class ActionDecoder:
                 "stop_loss": stop_loss,
                 "timeframe": "24H",
                 "lato": decision,
-                "limite": limit_price if ordertype == "LIMIT" else None,
+                "limite": limit_price if ordertype == "limit" else None,
                 "reduce_only": False
             }
         }

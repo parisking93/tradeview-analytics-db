@@ -5,6 +5,19 @@ import math
 import torch
 from datetime import datetime, timedelta
 
+# --- AMD ROCm Windows Fix ---
+# Fix per errore "rocrand_xorwow.h file not found" su Windows con GPU AMD
+if os.name == 'nt':
+    hip_path = os.environ.get('HIP_PATH')
+    if hip_path:
+        # Assicura che hiprtc trovi i file header in include/
+        include_path = os.path.join(hip_path, 'include')
+        current_cpath = os.environ.get('CPATH', '')
+        if include_path not in current_cpath:
+            os.environ['CPATH'] = f"{include_path};{current_cpath}"
+            print(f"🔧 ROCm Windows Fix: Aggiunto {include_path} a CPATH per compilazione JIT.")
+# ----------------------------
+
 # Path Setup
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
@@ -92,9 +105,14 @@ def simulate_pnl_from_preds(preds, current_price, future_segment, fee_rate=0.001
     tp_mult = float(preds["tp_mult"].clamp(0, 10).item())
     sl_mult = float(preds["sl_mult"].clamp(0, 10).item())
 
-    # Coerente con scaling del Trainer: tp_mult ~ pct/0.10, sl_mult ~ pct/0.05
-    tp_pct = max(0.0, min(0.10 * tp_mult, 0.50))
-    sl_pct = max(0.0, min(0.05 * sl_mult, 0.50))
+    # Coerente con Decoder: tp_mult * 0.10, sl_mult * 0.05
+    MIN_TP_PCT = 0.004
+    MIN_SL_PCT = 0.003
+    MAX_TP_PCT = 0.10
+    MAX_SL_PCT = 0.05
+
+    tp_pct = max(MIN_TP_PCT, min(tp_mult * MAX_TP_PCT, 0.50))
+    sl_pct = max(MIN_SL_PCT, min(sl_mult * MAX_SL_PCT, 0.50))
 
     # If LIMIT, compute entry from offset and verify fill on future_segment
     filled = True
@@ -139,7 +157,7 @@ def simulate_pnl_from_preds(preds, current_price, future_segment, fee_rate=0.001
             if verbose:
                 side_str = ["BUY", "SELL", "HOLD"][side]
                 ord_str = "LIMIT"
-                print(f"[VAL_DBG] side:{side_str} ord:{ord_str} px_off:{px_off:.6f} px_enforced:{px_off_enforced:.6f} ref:{current_price:.5f} limit:{entry:.5f} filled:False")
+                # print(f"[VAL_DBG] side:{side_str} ord:{ord_str} px_off:{px_off:.6f} px_enforced:{px_off_enforced:.6f} ref:{current_price:.5f} limit:{entry:.5f} filled:False")
             return 0.0, 0
 
     # Compute TP/SL relative to (possibly adjusted) entry
@@ -173,7 +191,7 @@ def simulate_pnl_from_preds(preds, current_price, future_segment, fee_rate=0.001
     if verbose:
         side_str = ["BUY", "SELL", "HOLD"][side]
         ord_str = "MARKET" if ordertype == 1 else "LIMIT"
-        print(f"[VAL_DBG] side:{side_str} ord:{ord_str} px_off:{px_off:.6f} px_enforced:{px_off_enforced:.6f} ref:{current_price:.5f} entry:{entry:.5f} filled:{filled}")
+        # print(f"[VAL_DBG] side:{side_str} ord:{ord_str} px_off:{px_off:.6f} px_enforced:{px_off_enforced:.6f} ref:{current_price:.5f} entry:{entry:.5f} filled:{filled}")
 
     return float(notional * net_ret), 1  # 1 = trade effettuato
 
@@ -271,6 +289,11 @@ def train_loop():
     print(f"🚀 TRAINING SU DISPOSITIVO: {device}")
     if device.type == 'cuda':
         print(f"   Scheda Video: {torch.cuda.get_device_name(0)}")
+        # --- FIX: Disable MIOpen if JIT fails ---
+        if os.name == 'nt':
+            print("🔧 Windows ROCm: Disabilitazione MIOpen (backend cudnn) per evitare errori JIT 'redefinition of forward'.")
+            torch.backends.cudnn.enabled = False
+        # ----------------------------------------
 
     model.to(device)
     trainer = TradingTrainer(model, db, vectorizer)
@@ -355,8 +378,9 @@ def train_loop():
                 continue
 
             # 4. Costruzione FORECAST
-            # Calcolo limite superiore: Pivot + Forward TF
-            forecast_upper_dt = add_timeframe_py(pivot_dt, FORECAST_FORWARD_TF)
+            # IMPORTANTE: In training NON dobbiamo vedere forecast generati DOPO il pivot_dt.
+            # In live (runGoogle), alle 12:00 non abbiamo forecast delle 13:00.
+            # Quindi filter condition: fc_timestamp <= pivot_dt.
 
             missing_forecast_for_this_pivot = False
 
@@ -364,49 +388,38 @@ def train_loop():
                 for tf_fc, limit_fc in TF_CONFIG_FORECAST.items():
                     fc_rows = cached_forecast_data.get(tf_fc, [])
                     if not fc_rows:
-                        # Se manca una tipologia intera di forecast per questa moneta, è ok o skip?
-                        # Per ora continuiamo provando a prenderne altri, o break se rigidi.
                         continue
 
-                    # Logica: Cerchiamo forecast con timestamp < forecast_upper_dt
-                    valid_fc = [f for f in fc_rows if f['timestamp_dt'] < forecast_upper_dt]
+                    # FILTRO CORRETTO: Solo forecast passati o presenti
+                    # find efficiently? fc_rows is sorted ASC.
+                    # Linear scan backwards or filter. Given len ~100k, filter is ok but maybe slow.
+                    # Optimization: fc_rows è ordinato per data. Binary search o bisect sarebbe top.
+                    # Per ora filter classico ma corretto.
+                    valid_fc = [f for f in fc_rows if f['timestamp_dt'] <= pivot_dt]
 
                     if valid_fc:
-                        # --- CONTROLLO FRESCHEZZA (STALENESS CHECK) ---
-                        # Prendiamo l'ultimo disponibile
+                        # Prendiamo gli ultimi 'limit_fc' validi (i più recenti rispetto al pivot)
                         candidate_fc = valid_fc[-limit_fc:]
                         last_candidate = candidate_fc[-1]
 
-                        # Calcoliamo quanto è vecchio questo forecast rispetto al pivot
-                        # Se il pivot è oggi, e il forecast è di 3 giorni fa, non va bene.
-                        # Tolleranza: 2 volte la durata del timeframe del forecast (es. 8 ore per 4h)
-                        # O più semplicemente: se dista più di 48 ore dal pivot, è troppo vecchio.
+                        # STALENESS CHECK
+                        # Se il forecast "più recente" che ho è comunque vecchio di 48 ore, c'è un buco nei dati.
                         time_diff = pivot_dt - last_candidate['timestamp_dt']
 
-                        # Se time_diff è negativo, il forecast è nel futuro rispetto al pivot (non dovrebbe accadere col filtro < upper, ma ok)
-                        # Se time_diff è positivo, il forecast è nel passato.
-
-                        # Esempio: Pivot 17 Nov. Forecast 02 Nov. Diff = 15 giorni. -> STALE.
-                        # Esempio: Pivot 17 Nov. Forecast 16 Nov. Diff = 1 giorno. -> OK.
-
                         if time_diff > timedelta(hours=48):
-                            # Dato troppo vecchio, probabilmente il download limitato non copre questa data
-                            # o il forecast non è stato generato.
                             missing_forecast_for_this_pivot = True
-                            break # Interrompiamo questo pivot, inutile trainare su dati vecchi
+                            break
 
                         context["forecast"].extend(candidate_fc)
                     else:
-                        # Nessun forecast trovato prima della data target
+                        # Non ho nessun forecast nel passato per questo pivot
                         missing_forecast_for_this_pivot = True
                         break
             else:
                 missing_forecast_for_this_pivot = True
 
             # Se i forecast sono troppo vecchi o mancanti per questo specifico pivot, saltiamo il training step
-            # Questo evita di addestrare il modello con "buco" nei dati input
             if missing_forecast_for_this_pivot:
-                # print(f"Skip {pair_name} at {pivot_dt}: Forecast mancanti o vecchi.")
                 continue
 
             # 5. Costruzione Futuro
@@ -440,6 +453,11 @@ def train_loop():
         if len(epoch_losses) > 0:
             avg_epoch_loss = sum(epoch_losses) / len(epoch_losses)
             print(f"--- FINE EPOCA {epoch+1} | Media Loss: {avg_epoch_loss:.5f} ---")
+
+            # --- SCHEDULER STEP (per-epoch, non per-sample!) ---
+            trainer.scheduler.step(avg_epoch_loss)
+            current_lr = trainer.optimizer.param_groups[0]['lr']
+            print(f"📉 LR attuale: {current_lr:.2e}")
 
             # === VALIDAZIONE WALK-FORWARD (PnL) ===
             model.eval()
@@ -539,10 +557,11 @@ def train_loop():
                     )
                     inputs_v = {k: v.to(device) for k, v in inputs_v.items()}
 
+                    brain_v = model.extract_features(inputs_v)
                     h_v = None
                     preds_v = None
                     for s in range(trainer.thinking_steps):
-                        y_v, h_v = model(inputs_v, h_v)
+                        y_v, h_v = model.think(brain_v, h_v)
                         preds_v = model.get_heads_dict(y_v)
 
                     current_price_v = float(context_v["candles"]["1h"][-1]["close"])
@@ -583,8 +602,9 @@ def train_loop():
             if penalized_score > best_penalized_score + 1e-8:  # epsilon per evitare flip su valori molto vicini
                 print(f"🌟 NUOVO BEST SCORE (Old: {best_penalized_score:.4f} -> New: {penalized_score:.4f}) - Salvataggio...")
                 best_penalized_score = penalized_score
-                trainer.save_checkpoint("trainerBest.pth")
+                trainer.save_checkpoint("model/trainerBest.pth")
             else:
+                trainer.save_checkpoint("model/trainerLast.pth")
                 print(f"--- Nessun miglioramento SCORE (Best: {best_penalized_score:.4f}) ---")
 
         db.close_connection()

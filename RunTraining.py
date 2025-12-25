@@ -145,14 +145,14 @@ def train_loop():
             if avg_epoch_loss < best_loss:
                 print(f"!!! NUOVO RECORD !!! (Old: {best_loss:.5f} -> New: {avg_epoch_loss:.5f})")
                 best_loss = avg_epoch_loss
-                trainer.save_checkpoint("trm_model_best.pth")
+                trainer.save_checkpoint("model/trm_model_best.pth")
             else:
                 print(f"--- Nessun miglioramento (Best: {best_loss:.5f}) ---")
         # Salva checkpoint alla fine di ogni epoca (importante!)
-        trainer.save_checkpoint("trm_model_v3.pth")
+        trainer.save_checkpoint("model/trm_model_v3.pth")
 
     # Fine Training
-    trainer.save_checkpoint("trm_model_v3.pth")
+    trainer.save_checkpoint("model/trm_model_v3.pth")
     db.close_connection()
     print("--- TRAINING COMPLETATO ---")
 

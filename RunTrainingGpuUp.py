@@ -5,6 +5,19 @@ import math
 import torch
 from datetime import datetime, timedelta
 
+# --- AMD ROCm Windows Fix ---
+# Fix per errore "rocrand_xorwow.h file not found" su Windows con GPU AMD
+if os.name == 'nt':
+    hip_path = os.environ.get('HIP_PATH')
+    if hip_path:
+        # Assicura che hiprtc trovi i file header in include/
+        include_path = os.path.join(hip_path, 'include')
+        current_cpath = os.environ.get('CPATH', '')
+        if include_path not in current_cpath:
+            os.environ['CPATH'] = f"{include_path};{current_cpath}"
+            print(f"🔧 ROCm Windows Fix: Aggiunto {include_path} a CPATH per compilazione JIT.")
+# ----------------------------
+
 # Path Setup
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
@@ -284,49 +297,32 @@ def train_loop():
                 continue
 
             # 4. Costruzione FORECAST
-            # Calcolo limite superiore: Pivot + Forward TF
-            forecast_upper_dt = add_timeframe_py(pivot_dt, FORECAST_FORWARD_TF)
-
+            # IMPORTANTE: In training NON dobbiamo vedere forecast generati DOPO il pivot_dt.
             missing_forecast_for_this_pivot = False
 
             if cached_forecast_data:
                 for tf_fc, limit_fc in TF_CONFIG_FORECAST.items():
                     fc_rows = cached_forecast_data.get(tf_fc, [])
                     if not fc_rows:
-                        # Se manca una tipologia intera di forecast per questa moneta, è ok o skip?
-                        # Per ora continuiamo provando a prenderne altri, o break se rigidi.
                         continue
 
-                    # Logica: Cerchiamo forecast con timestamp < forecast_upper_dt
-                    valid_fc = [f for f in fc_rows if f['timestamp_dt'] < forecast_upper_dt]
+                    # FILTRO CORRETTO: Solo forecast passati o presenti
+                    valid_fc = [f for f in fc_rows if f['timestamp_dt'] <= pivot_dt]
 
                     if valid_fc:
-                        # --- CONTROLLO FRESCHEZZA (STALENESS CHECK) ---
-                        # Prendiamo l'ultimo disponibile
+                        # Prendiamo gli ultimi 'limit_fc' validi
                         candidate_fc = valid_fc[-limit_fc:]
                         last_candidate = candidate_fc[-1]
 
-                        # Calcoliamo quanto è vecchio questo forecast rispetto al pivot
-                        # Se il pivot è oggi, e il forecast è di 3 giorni fa, non va bene.
-                        # Tolleranza: 2 volte la durata del timeframe del forecast (es. 8 ore per 4h)
-                        # O più semplicemente: se dista più di 48 ore dal pivot, è troppo vecchio.
+                        # STALENESS CHECK
                         time_diff = pivot_dt - last_candidate['timestamp_dt']
 
-                        # Se time_diff è negativo, il forecast è nel futuro rispetto al pivot (non dovrebbe accadere col filtro < upper, ma ok)
-                        # Se time_diff è positivo, il forecast è nel passato.
-
-                        # Esempio: Pivot 17 Nov. Forecast 02 Nov. Diff = 15 giorni. -> STALE.
-                        # Esempio: Pivot 17 Nov. Forecast 16 Nov. Diff = 1 giorno. -> OK.
-
                         if time_diff > timedelta(hours=48):
-                            # Dato troppo vecchio, probabilmente il download limitato non copre questa data
-                            # o il forecast non è stato generato.
                             missing_forecast_for_this_pivot = True
-                            break # Interrompiamo questo pivot, inutile trainare su dati vecchi
+                            break
 
                         context["forecast"].extend(candidate_fc)
                     else:
-                        # Nessun forecast trovato prima della data target
                         missing_forecast_for_this_pivot = True
                         break
             else:
@@ -370,6 +366,7 @@ def train_loop():
             model.eval()
             val_samples = 200
             val_pnls = []
+            val_trades = []
 
             with torch.no_grad():
                 for _ in range(val_samples):
@@ -417,7 +414,6 @@ def train_loop():
                         continue
 
                     # Forecast (stessa logica / freschezza)
-                    forecast_upper_dt_v = add_timeframe_py(pivot_dt_v, FORECAST_FORWARD_TF)
                     missing_fc_v = False
 
                     for tf_fc, limit_fc in TF_CONFIG_FORECAST.items():
@@ -425,10 +421,13 @@ def train_loop():
                         if not fc_rows_v:
                             continue
 
-                        valid_fc_v = [f for f in fc_rows_v if f["timestamp_dt"] < forecast_upper_dt_v]
+                        # FILTRO CORRETTO: <= pivot_dt
+                        valid_fc_v = [f for f in fc_rows_v if f["timestamp_dt"] <= pivot_dt_v]
+
                         if valid_fc_v:
                             candidate_fc_v = valid_fc_v[-limit_fc:]
                             last_candidate_v = candidate_fc_v[-1]
+
                             time_diff_v = pivot_dt_v - last_candidate_v["timestamp_dt"]
                             if time_diff_v > timedelta(hours=48):
                                 missing_fc_v = True
@@ -463,15 +462,20 @@ def train_loop():
                     )
                     inputs_v = {k: v.to(device) for k, v in inputs_v.items()}
 
+                    brain_v = model.extract_features(inputs_v)
                     h_v = None
                     preds_v = None
                     for s in range(trainer.thinking_steps):
-                        y_v, h_v = model(inputs_v, h_v)
+                        y_v, h_v = model.think(brain_v, h_v)
                         preds_v = model.get_heads_dict(y_v)
 
                     current_price_v = float(context_v["candles"]["1h"][-1]["close"])
                     pnl_v = simulate_pnl_from_preds(preds_v, current_price_v, future_segment_v, fee_rate=0.001)
                     val_pnls.append(pnl_v)
+
+                    # Calcola trade flag
+                    side_v = int(torch.argmax(preds_v["side"]).item())
+                    val_trades.append(1 if side_v != 2 else 0)
 
             # === CALCOLO SCORE PENALIZZATO ===
             # Skip validation se non abbiamo campioni
@@ -504,9 +508,9 @@ def train_loop():
             if penalized_score > best_penalized_score + 1e-8:
                 print(f"🌟 NUOVO BEST SCORE (Old: {best_penalized_score:.4f} -> New: {penalized_score:.4f}) - Salvataggio...")
                 best_penalized_score = penalized_score
-                trainer.save_checkpoint("trainerUpPnl.pth")
+                trainer.save_checkpoint("model/trainerUpPnl.pth")
             else:
-                trainer.save_checkpoint("trainerUpN.pth")
+                trainer.save_checkpoint("model/trainerUpN.pth")
                 print(f"--- Nessun miglioramento SCORE (Best: {best_penalized_score:.4f}) ---")
 
         db.close_connection()
