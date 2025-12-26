@@ -49,9 +49,10 @@ class TradingTrainer:
         # --- LOSS FUNCTIONS SEPARATE ---
 
         # 1. Loss per il SIDE (3 classi: Buy, Sell, Hold)
-        # Qui USIAMO i pesi per bilanciare l'Hold
-        self.weights_side = torch.tensor([1.8, 1.8, 1.0])
-        self.loss_ce_side = nn.CrossEntropyLoss(weight=self.weights_side)
+        # 2. Bilanciamento Classi (HOLD è molto frequente, alziamo pesi BUY/SELL)
+        # Portiamo da [1.8, 1.8, 1.0] a [3.0, 3.0, 1.0] per forzare uscita da HOLD
+        self.weights_side = torch.tensor([2.2, 2.2, 1.0])
+        self.criterion_side = nn.CrossEntropyLoss(weight=self.weights_side)
 
         # 2. Loss per ORDER TYPE (2 classi: Limit, Market)
         # Qui NON usiamo pesi (o standard), perche Limit e Market sono bilanciati
@@ -214,6 +215,79 @@ class TradingTrainer:
 
         return total_probability
 
+    def _compute_pnl_reward(self, preds, current_price, future_candles, fee_rate=0.001):
+        """
+        Compute simulated PnL for a given prediction.
+        Returns a dictionary with PnL and debug info.
+        """
+        if not future_candles or len(future_candles) < 5:
+            return {'pnl': 0.0, 'hit_tp': 0, 'hit_sl': 0}
+
+        side = int(torch.argmax(preds["side"]).item())
+        if side == 2:  # HOLD
+            return {'pnl': 0.0, 'hit_tp': 0, 'hit_sl': 0}
+
+        # Extract prediction values
+        qty_frac = float(preds["qty"].clamp(0, 1).item())
+        lev = float(preds["leverage"].clamp(1, 5).item())
+        tp_mult = float(preds["tp_mult"].clamp(0, 10).item())
+        sl_mult = float(preds["sl_mult"].clamp(0, 10).item())
+
+        notional = 100.0 * qty_frac * lev
+        entry = float(current_price)
+
+        if notional <= 0.0 or entry <= 0.0:
+            return {'pnl': 0.0, 'hit_tp': 0, 'hit_sl': 0}
+
+        # TP/SL percentages (simplified, consistent with Decoder)
+        tp_pct = max(0.004, min(tp_mult * 0.10, 0.50))
+        sl_pct = max(0.003, min(sl_mult * 0.05, 0.50))
+
+        hit_tp = 0
+        hit_sl = 0
+
+        # Simulate exit price based on TP/SL hitting
+        if side == 0:  # BUY
+            tp = entry * (1.0 + tp_pct)
+            sl = entry * (1.0 - sl_pct)
+            exit_px = float(future_candles[-1]["close"])
+            for c in future_candles:
+                if float(c["low"]) <= sl:
+                    exit_px = sl
+                    hit_sl = 1
+                    break
+                if float(c["high"]) >= tp:
+                    exit_px = tp
+                    hit_tp = 1
+                    break
+            raw_ret = (exit_px - entry) / entry
+        else:  # SELL
+            tp = entry * (1.0 - tp_pct)
+            sl = entry * (1.0 + sl_pct)
+            exit_px = float(future_candles[-1]["close"])
+            for c in future_candles:
+                if float(c["high"]) >= sl:
+                    exit_px = sl
+                    hit_sl = 1
+                    break
+                if float(c["low"]) <= tp:
+                    exit_px = tp
+                    hit_tp = 1
+                    break
+            raw_ret = (entry - exit_px) / entry
+
+        # HighTF fee rate might be slightly different or we keep 0.001
+        net_ret = raw_ret - 2.0 * fee_rate
+        return {
+            'pnl': float(notional * net_ret),
+            'hit_tp': hit_tp,
+            'hit_sl': hit_sl,
+            'qty_frac': qty_frac,
+            'lev': lev,
+            'tp_mult': tp_mult,
+            'sl_mult': sl_mult
+        }
+
     def _simulate_clarity_pnl(self, side: int, curr_price: float, futures: list,
                                tp_mult: float = 0.5, sl_mult: float = 0.5) -> float:
         """
@@ -259,6 +333,21 @@ class TradingTrainer:
         # Sottraiamo fee_rate round-trip (approssimato 0.1% * 2)
         net_ret = raw_ret - 0.002
         return float(net_ret)
+
+    def _compute_rl_loss_multi_head(self, preds, step_reward, pred_side_idx, device):
+        """
+        Compute RL losses for ALL heads, not just side.
+        """
+        log_probs_side = F.log_softmax(preds['side'], dim=-1)
+        picked_lp_side = log_probs_side.gather(1, pred_side_idx.view(-1, 1)).view(-1)
+        rl_side = -(step_reward * picked_lp_side).mean()
+
+        rl_qty = -(step_reward * preds['qty']).mean() * 0.1
+        rl_tp  = -(step_reward * preds['tp_mult']).mean() * 0.1
+        rl_sl  = -(step_reward * preds['sl_mult']).mean() * 0.1
+        rl_lev = -(step_reward * preds['leverage']).mean() * 0.1
+
+        return rl_side + rl_qty + rl_tp + rl_sl + rl_lev
 
     def generate_fake_order(self, context, pair_limits):
         """
@@ -581,8 +670,9 @@ class TradingTrainer:
 
             # Calcola soglia dinamica basata su ATR% della currency
             atr_pct = _estimate_atr_pct(highs[:8], lows[:8], closes[:8])
-            # Soglia: ~2-3% ma adattata alla volatilità (circa 1.5x ATR)
-            min_profit_threshold = max(0.010, 1.1 * atr_pct)
+            # 4. Profitability Filter (Oracle)
+            # Abbassiamo leggermente da 1.1x ATR a 0.8x ATR per catturare più opportunità
+            min_profit_threshold = max(0.010, 1 * atr_pct)
 
             # Calcola la variazione percentuale
             pct_change = (future_close - current_price) / current_price
@@ -684,8 +774,8 @@ class TradingTrainer:
 
             device = next(self.model.parameters()).device
             # Assegniamo i pesi solo alla loss del Side
-            if self.loss_ce_side.weight.device != device:
-                 self.loss_ce_side.weight = self.weights_side.to(device)
+            if self.criterion_side.weight.device != device:
+                 self.criterion_side.weight = self.weights_side.to(device)
 
             for k, v in inputs.items():
                 inputs[k] = v.to(device)
@@ -733,8 +823,8 @@ class TradingTrainer:
             last_preds = None
 
             for s in range(self.thinking_steps):
-                # Peso: diamo piu importanza agli step finali
-                w = float(s + 1) / float(self.thinking_steps)
+                # Peso ESPONENZIALE: favorendo gli step finali si forza il modello a "pensare"
+                w = (float(s + 1) / float(self.thinking_steps)) ** 2
                 sum_w += w
 
                 # Forward con memoria ricorrente del cervello centrale
@@ -743,7 +833,7 @@ class TradingTrainer:
                 last_preds = preds  # per logging a fine funzione
 
                 # Loss per questo step (stessa logica di prima)
-                loss_side_step = self.loss_ce_side(preds['side'], t_side).squeeze()
+                loss_side_step = self.criterion_side(preds['side'], t_side).squeeze()
 
                 # queste hanno mask is_active -> diventano [B,1], le riduciamo con mean()
                 loss_qty_step = (self.loss_mse(preds['qty'], t_qty) * is_active).mean().squeeze()
@@ -792,14 +882,25 @@ class TradingTrainer:
                 acc_loss_type = acc_loss_type + (w * loss_type_step)
                 acc_loss_halt = acc_loss_halt + (w * loss_halt_step)
 
-                # ---- RL REWARD CALCULATION ----
+                # ---- RL REWARD: TRUE PnL-BASED ----
                 with torch.no_grad():
                     pred_side_idx = torch.argmax(preds['side'], dim=-1)
-                    step_reward = torch.where(pred_side_idx == t_side, 1.0, -1.0)
 
-                log_probs = F.log_softmax(preds['side'], dim=-1)
-                picked_log_probs = log_probs.gather(1, pred_side_idx.view(-1, 1)).view(-1)
-                loss_rl_step = -(step_reward * picked_log_probs).mean()
+                    # Simulate PnL for this prediction
+                    reward_info = self._compute_pnl_reward(
+                        preds, current_close, future_candles
+                    )
+                    pnl_reward = reward_info['pnl']
+
+                    # Scale PnL to reward: divide by 1.0 (HighTF has smaller expected returns per trade)
+                    # or stay consistent with Trainer.py (divide by 10)
+                    step_reward = torch.tensor(
+                        max(-2.0, min(2.0, pnl_reward / 10.0)),
+                        device=device
+                    )
+
+                # Multi-Head RL Loss
+                loss_rl_step = self._compute_rl_loss_multi_head(preds, step_reward, pred_side_idx, device)
                 acc_loss_rl = acc_loss_rl + (w * loss_rl_step)
 
             # Media pesata tra gli step
@@ -851,7 +952,11 @@ class TradingTrainer:
                 "loss_type": loss_type.item(),
                 "loss_halt": loss_halt.item(),
                 "target_side": t_side.item(),
-                "pred_side": torch.argmax(last_preds['side']).item() if last_preds is not None else -1
+                "pred_side": torch.argmax(last_preds['side']).item() if last_preds is not None else -1,
+                # RL Debug Info
+                "rl_pnl": reward_info['pnl'],
+                "rl_hit_tp": reward_info['hit_tp'],
+                "rl_hit_sl": reward_info['hit_sl']
             }
 
         finally:

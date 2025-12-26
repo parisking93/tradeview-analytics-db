@@ -120,15 +120,24 @@ class TradingTrainer:
         if effective_pnl_pct <= 0:
             return 0.0
 
+        # 1. FLOOR: PnL effettivo deve coprire almeno le fee (0.002 ~ 0.20%)
+        # In precedenza era 0.025 (2.5%), troppo rigido.
+        # Abbassiamo a 0.5% se c'è reversal momentum, altrimenti restiamo a 2.0% per garantire profitto sano.
+        MIN_CLEAN_PNL = 0.020
+        EMERGENCY_EXIT_PNL = 0.005
+
+        # Controllo minimo PnL (verrà raffinato dopo con momentum_factor)
+        if effective_pnl_pct < EMERGENCY_EXIT_PNL:
+            return 0.0
         # === SOGLIE (Aggiornate per coprire le fee) ===
-        MIN_PNL_PCT = 0.025       # 2.5% minimo (Fee su 5x leva ~2.0%)
+        # MIN_PNL_PCT = 0.025       # 2.5% minimo (Fee su 5x leva ~2.0%)
         GOOD_PNL_PCT = 0.05       # 5% = profitto decente
         HIGH_PNL_PCT = 0.10       # 10% = profitto alto
         VERY_HIGH_PNL_PCT = 0.15  # 20% = profitto eccellente
 
         # Se PnL troppo basso, non chiudere (non vale la pena rischiare per 10 centesimi)
-        if effective_pnl_pct < MIN_PNL_PCT:
-            return 0.0
+        # if effective_pnl_pct < MIN_PNL_PCT:
+        #     return 0.0
 
         # === FATTORE 1: PNL% ===
         # Sigmoid centrata a 6% (GOOD + 1%), scala più morbida
@@ -195,6 +204,12 @@ class TradingTrainer:
                 # Extra: se uno dei high futuri sale sopra entry, chiudi!
                 if any(high > entry_price for high in future_highs):
                     momentum_factor += 0.20
+
+        # === REFINED PNL CHECK (dopo calcolo momentum) ===
+        # Se il momentum è fortemente contrario (>0.7), permettiamo uscita anche con PnL basso
+        # Altrimenti richiediamo almeno MIN_CLEAN_PNL
+        if momentum_factor < 0.7 and effective_pnl_pct < MIN_CLEAN_PNL:
+            return 0.0
 
         # === FATTORE 4: FUTURE RISK (0.0 - 0.30) ===
         future_risk_factor = 0.0
@@ -484,7 +499,7 @@ class TradingTrainer:
                 # --- LOGICA LONG (BUY) ---
                 if subtype == 'buy':
                     # 1. Controllo Immediato (Siamo già fuori range?)
-                    # Se prezzo attuale > TP (Riscuoti) o < SL (Stop Loss) -> Chiudi subito
+                    # Se prezzo attuale > TP (Riscuosti) o < SL (Stop Loss) -> Chiudi subito
                     if (tp_price and current_price >= tp_price) or (sl_price and current_price <= sl_price):
                         should_close = True
 
@@ -910,9 +925,9 @@ class TradingTrainer:
                     temp = self.temperature_deep
                 else:
                     temp = self.temperature_standard
-
-                # Peso: diamo piu importanza agli step finali
-                w = float(s + 1) / float(max_steps)
+            # Peso ESPONENZIALE: diamo molta più importanza agli step finali
+            # Questo obbliga il modello a "evolvere" lo stato nascosto invece di mappare l'input al primo step.
+                w = (float(s + 1) / float(max_steps)) ** 2
                 sum_w += w
 
                 # Forward step ricorrente del cervello centrale
@@ -988,24 +1003,23 @@ class TradingTrainer:
 
                 # ---- RL REWARD: TRUE PnL-BASED ----
                 # Simulate actual PnL from current predictions against future candles.
-                # This replaces the naive "imitation" reward (pred == target).
                 with torch.no_grad():
                     pred_side_idx = torch.argmax(preds['side'], dim=-1)
 
                     # Simulate PnL for this prediction
-                    pnl_reward, is_trade = self._compute_pnl_reward(
+                    reward_info = self._compute_pnl_reward(
                         preds, current_close, future_candles
                     )
+                    pnl_reward = reward_info['pnl']
+
                     # Scale PnL to reward: divide by 10€, clamp to [-2, 2]
                     step_reward = torch.tensor(
                         max(-2.0, min(2.0, pnl_reward / 10.0)),
                         device=device
                     )
 
-                # Policy gradient loss: -reward * log_prob (REINFORCE)
-                log_probs = F.log_softmax(preds['side'], dim=-1)
-                picked_log_probs = log_probs.gather(1, pred_side_idx.view(-1, 1)).view(-1)
-                loss_rl_step = -(step_reward * picked_log_probs).mean()
+                # Multi-Head RL Loss: Updates Side (REINFORCE) + qty/tp/sl/lev (Policy Gradient)
+                loss_rl_step = self._compute_rl_loss_multi_head(preds, step_reward, pred_side_idx, device)
 
                 # Accumulo pesato
                 acc_loss_side = acc_loss_side + (w * loss_side_step)
@@ -1123,7 +1137,11 @@ class TradingTrainer:
                 "loss_rl": loss_rl.item(),
                 "target_side": t_side.item(),
                 "pred_side": torch.argmax(last_preds['side']).item() if last_preds is not None else -1,
-                "simulated_wallet": updated_wallet
+                "simulated_wallet": updated_wallet,
+                # RL Debug Info
+                "rl_pnl": reward_info['pnl'],
+                "rl_hit_tp": reward_info['hit_tp'],
+                "rl_hit_sl": reward_info['hit_sl']
             }
 
         finally:
@@ -1136,14 +1154,14 @@ class TradingTrainer:
     def _compute_pnl_reward(self, preds, current_price, future_candles, fee_rate=0.001):
         """
         Compute simulated PnL for a given prediction.
-        Returns (pnl_float, is_trade_int).
+        Returns a dictionary with PnL and debug info.
         """
         if not future_candles or len(future_candles) < 5:
-            return 0.0, 0
+            return {'pnl': 0.0, 'hit_tp': 0, 'hit_sl': 0}
 
         side = int(torch.argmax(preds["side"]).item())
         if side == 2:  # HOLD
-            return 0.0, 0
+            return {'pnl': 0.0, 'hit_tp': 0, 'hit_sl': 0}
 
         # Extract prediction values
         qty_frac = float(preds["qty"].clamp(0, 1).item())
@@ -1155,11 +1173,14 @@ class TradingTrainer:
         entry = float(current_price)
 
         if notional <= 0.0 or entry <= 0.0:
-            return 0.0, 0
+            return {'pnl': 0.0, 'hit_tp': 0, 'hit_sl': 0}
 
         # TP/SL percentages (simplified, consistent with Decoder)
         tp_pct = max(0.004, min(tp_mult * 0.10, 0.50))
         sl_pct = max(0.003, min(sl_mult * 0.05, 0.50))
+
+        hit_tp = 0
+        hit_sl = 0
 
         # Simulate exit price based on TP/SL hitting
         if side == 0:  # BUY
@@ -1169,9 +1190,11 @@ class TradingTrainer:
             for c in future_candles:
                 if float(c["low"]) <= sl:
                     exit_px = sl
+                    hit_sl = 1
                     break
                 if float(c["high"]) >= tp:
                     exit_px = tp
+                    hit_tp = 1
                     break
             raw_ret = (exit_px - entry) / entry
         else:  # SELL
@@ -1181,14 +1204,47 @@ class TradingTrainer:
             for c in future_candles:
                 if float(c["high"]) >= sl:
                     exit_px = sl
+                    hit_sl = 1
                     break
                 if float(c["low"]) <= tp:
                     exit_px = tp
+                    hit_tp = 1
                     break
             raw_ret = (entry - exit_px) / entry
 
         net_ret = raw_ret - 2.0 * fee_rate
-        return float(notional * net_ret), 1
+        return {
+            'pnl': float(notional * net_ret),
+            'hit_tp': hit_tp,
+            'hit_sl': hit_sl,
+            'qty_frac': qty_frac,
+            'lev': lev,
+            'tp_mult': tp_mult,
+            'sl_mult': sl_mult
+        }
+
+    def _compute_rl_loss_multi_head(self, preds, step_reward, pred_side_idx, device):
+        """
+        Compute RL losses for ALL heads, not just side.
+        - Side: REINFORCE (discrete action)
+        - qty/tp/sl/lev: Gradient signal proportional to reward
+        """
+        # SIDE: standard REINFORCE
+        log_probs_side = F.log_softmax(preds['side'], dim=-1)
+        picked_lp_side = log_probs_side.gather(1, pred_side_idx.view(-1, 1)).view(-1)
+        rl_side = -(step_reward * picked_lp_side).mean()
+
+        # CONTINUOUS HEADS: simple policy gradient approximation
+        # Spingiamo le predizioni nella direzione del reward
+        # (se reward > 0, predizioni attuali vengono rinforzate)
+        # Usiamo coefficienti piccoli (0.1) per non dominare la supervisionata
+        # Nota: Usiamo .mean() per scalare sulla batch (anche se qui B=1)
+        rl_qty = -(step_reward * preds['qty']).mean() * 0.1
+        rl_tp  = -(step_reward * preds['tp_mult']).mean() * 0.1
+        rl_sl  = -(step_reward * preds['sl_mult']).mean() * 0.1
+        rl_lev = -(step_reward * preds['leverage']).mean() * 0.1
+
+        return rl_side + rl_qty + rl_tp + rl_sl + rl_lev
 
 
     def save_checkpoint(self, path="model/model_checkpoint.pth"):

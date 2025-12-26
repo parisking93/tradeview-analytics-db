@@ -32,7 +32,7 @@ THINKING_STEPS = 6
 THINKING_STEPS_EXTENDED = 15  # Deep Thinking steps
 MIN_STEPS = 2
 HALT_THRESHOLD = 0.70
-HALT_UNCERTAIN_THRESHOLD = 0.65  # Sotto questa, attiva Deep
+HALT_UNCERTAIN_THRESHOLD = 0.61  # Sotto questa, attiva Deep
 
 # Temperature settings
 TEMPERATURE_STANDARD = 1.0

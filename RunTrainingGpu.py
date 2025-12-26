@@ -205,7 +205,7 @@ def train_loop():
     FORECAST_FORWARD_TF = "1d" # Quanto in avanti guardiamo per selezionare il forecast
 
     LOOKAHEAD_STEPS = 180  # 24 ore nel futuro per l'Oracolo (Target)
-    EPOCHS = 200
+    EPOCHS = 300
     CACHE_LIMIT = 800000    # Candele storiche
     FORECAST_CACHE_LIMIT = 800000 # Forecast limit
 
@@ -449,7 +449,8 @@ def train_loop():
                     # Loggare le loss per head
                     print(f"[Ep {epoch+1}][Step {global_step}] {pair_name} | Loss: {loss:.4f} (Avg: {moving_avg_loss:.4f}) | RL Loss: {metrics.get('loss_rl', 0):.4f} | T: {side_str} vs P: {pred_str}")
                     print(f"  ├─ side:{metrics.get('loss_side', 0):.4f} | type:{metrics.get('loss_type', 0):.4f} | qty:{metrics.get('loss_qty', 0):.4f} | px:{metrics.get('loss_px', 0):.4f}")
-                    print(f"  └─ tp:{metrics.get('loss_tp', 0):.4f} | sl:{metrics.get('loss_sl', 0):.4f} | lev:{metrics.get('loss_lev', 0):.4f} | halt:{metrics.get('loss_halt', 0):.4f}")
+                    print(f"  ├─ tp:{metrics.get('loss_tp', 0):.4f} | sl:{metrics.get('loss_sl', 0):.4f} | lev:{metrics.get('loss_lev', 0):.4f} | halt:{metrics.get('loss_halt', 0):.4f}")
+                    print(f"  └─ 🔎 RL PnL: {metrics.get('rl_pnl', 0):.2f}€ | Hit: {'TP' if metrics.get('rl_hit_tp') else 'SL' if metrics.get('rl_hit_sl') else 'NONE'}")
 
 
         # === FINE EPOCA ===
