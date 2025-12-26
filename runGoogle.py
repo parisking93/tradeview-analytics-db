@@ -32,7 +32,7 @@ THINKING_STEPS = 6
 THINKING_STEPS_EXTENDED = 15  # Deep Thinking steps
 MIN_STEPS = 2
 HALT_THRESHOLD = 0.70
-HALT_UNCERTAIN_THRESHOLD = 0.50  # Sotto questa, attiva Deep
+HALT_UNCERTAIN_THRESHOLD = 0.65  # Sotto questa, attiva Deep
 
 # Temperature settings
 TEMPERATURE_STANDARD = 1.0
@@ -201,11 +201,10 @@ class BrainInstance:
                 y, h = self.model(inputs_device, h)
                 current_heads = self.model.get_heads_dict(y, temperature=TEMPERATURE_STANDARD)
                 halt_prob = current_heads['halt_prob'].item()
-
                 can_stop = (steps_taken >= MIN_STEPS)
                 # ---- HALT threshold schedule per-step ----
-                t0 = 0.65  # subito dopo MIN_STEPS
-                t1 = 0.55  # verso l'ultimo step
+                t0 = 0.70  # subito dopo MIN_STEPS
+                t1 = 0.60  # verso l'ultimo step
 
                 if THINKING_STEPS > MIN_STEPS:
                     prog = (steps_taken - MIN_STEPS) / float(THINKING_STEPS - MIN_STEPS)
@@ -218,6 +217,8 @@ class BrainInstance:
                 forced_stop = (steps_taken == THINKING_STEPS)
 
                 temp_action = decoder.decode(current_heads, steps_taken)
+                print(f"{self.print_prefix} {pair_data['pair']} 🧠 HALT PROB: {halt_prob:.4f} threshold: {halt_thr_step} action: {temp_action['decision']} price: {temp_action['limit_price']} take_profit: {temp_action['take_profit']} stop_loss: {temp_action['stop_loss']}")
+                # print(f"{self.print_prefix} {pair_data['pair']} 🧠 ACTION: {temp_action}")
 
                 if can_stop and (wants_to_stop or forced_stop):
                     final_action = temp_action

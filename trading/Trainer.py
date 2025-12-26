@@ -35,7 +35,7 @@ class TradingTrainer:
         # Carica pesi (Best effort)
         try:
         #     self.model.load_state_dict(torch.load("trm_model_v2.pth"), strict=False)
-            self.model.load_state_dict(torch.load("model/trainerLast.pth"), strict=False)
+            self.model.load_state_dict(torch.load("model/trainerLastHalt.pth"), strict=False)
             print("--- Pesi 'Best Model' caricati ---")
         except:
             print("--- Nessun peso precedente, start fresh ---")
@@ -44,7 +44,7 @@ class TradingTrainer:
 
         # --- SCHEDULER ---
         self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-            self.optimizer, mode='min', factor=0.5, patience=50
+            self.optimizer, mode='min', factor=0.5, patience=70
         )
         self.accumulation_steps = 8 # Aumentato per gradienti più stabili (batch virtuale più grande)
 
@@ -90,6 +90,160 @@ class TradingTrainer:
         import math
         clarity = 1.0 / (1.0 + math.exp(-3.0 * (normalized_margin - 1.0)))
         return max(0.1, min(0.95, clarity))
+
+    def _compute_smart_close_probability(
+        self, entry_price: float, current_price: float,
+        tp_price: float, sl_price: float,
+        future_candles: list, subtype: str, order_lev: float = 1.0
+    ) -> float:
+        """
+        Calcola probabilità di chiusura smart basata su:
+        1. PnL% effettivo (quanto profitto hai fatto in %)
+        2. Progress verso il Take Profit (quanto sei vicino al target)
+        3. Momentum/Reversal detection (il mercato sta girando?)
+        4. Future Risk (sta per andare contro di te?)
+
+        Returns: probabilità 0.0-1.0 di chiudere l'ordine.
+        """
+        import math
+
+        # === CALCOLO PNL% ===
+        if subtype == 'buy':
+            pnl_pct = (current_price - entry_price) / entry_price
+        else:  # sell
+            pnl_pct = (entry_price - current_price) / entry_price
+
+        # Considera la leva per il PnL effettivo sul margine
+        effective_pnl_pct = pnl_pct * order_lev
+
+        # Se in perdita, non chiudere anticipatamente (lascia che colpisca SL)
+        if effective_pnl_pct <= 0:
+            return 0.0
+
+        # === SOGLIE (Aggiornate per coprire le fee) ===
+        MIN_PNL_PCT = 0.025       # 2.5% minimo (Fee su 5x leva ~2.0%)
+        GOOD_PNL_PCT = 0.05       # 5% = profitto decente
+        HIGH_PNL_PCT = 0.10       # 10% = profitto alto
+        VERY_HIGH_PNL_PCT = 0.15  # 20% = profitto eccellente
+
+        # Se PnL troppo basso, non chiudere (non vale la pena rischiare per 10 centesimi)
+        if effective_pnl_pct < MIN_PNL_PCT:
+            return 0.0
+
+        # === FATTORE 1: PNL% ===
+        # Sigmoid centrata a 6% (GOOD + 1%), scala più morbida
+        pnl_sigmoid_input = (effective_pnl_pct - 0.06) / 0.04
+        pnl_factor = 0.05 + 0.65 * (1.0 / (1.0 + math.exp(-pnl_sigmoid_input)))
+
+        # === FATTORE 2: PROGRESS TO TP (0.0 - 0.25) ===
+        progress_factor = 0.0
+        if tp_price and tp_price > 0:
+            if subtype == 'buy':
+                total_distance = tp_price - entry_price
+                current_progress = current_price - entry_price
+            else:  # sell
+                total_distance = entry_price - tp_price
+                current_progress = entry_price - current_price
+
+            if total_distance > 0:
+                progress_ratio = current_progress / total_distance
+                progress_ratio = max(0.0, min(1.0, progress_ratio))
+
+                # Se oltre il 60% del percorso verso TP, aggiungi probabilità
+                if progress_ratio > 0.6:
+                    progress_factor = 0.25 * ((progress_ratio - 0.6) / 0.4)  # 0 a 0.25
+
+        # === FATTORE 3: MOMENTUM / REVERSAL DETECTION (-0.15 - +0.25) ===
+        momentum_factor = 0.0
+        if future_candles and len(future_candles) >= 3:
+            # Guarda le prossime 3-5 candele per rilevare inversione
+            look_ahead = min(5, len(future_candles))
+
+            if subtype == 'buy':
+                # LONG: se il prezzo sta scendendo, chiudi prima che il profitto sparisca
+                future_closes = [float(c['close']) for c in future_candles[:look_ahead]]
+                future_lows = [float(c['low']) for c in future_candles[:look_ahead]]
+
+                # Calcola direzione: media dei prossimi close vs current
+                avg_future = sum(future_closes) / len(future_closes)
+                direction = (avg_future - current_price) / current_price
+
+                # Se sta scendendo (direzione negativa), aumenta probabilità chiusura
+                if direction < -0.005:  # Scende più di 0.5%
+                    momentum_factor = min(0.25, abs(direction) * 10)
+                elif direction > 0.01:  # Sale più di 1% → lascia correre
+                    momentum_factor = -0.15
+
+                # Extra: se uno dei low futuri scende sotto entry, chiudi!
+                if any(low < entry_price for low in future_lows):
+                    momentum_factor += 0.20  # Forte segnale di chiusura
+
+            else:  # sell
+                # SHORT: se il prezzo sta salendo, chiudi prima che il profitto sparisca
+                future_closes = [float(c['close']) for c in future_candles[:look_ahead]]
+                future_highs = [float(c['high']) for c in future_candles[:look_ahead]]
+
+                avg_future = sum(future_closes) / len(future_closes)
+                direction = (avg_future - current_price) / current_price
+
+                # Se sta salendo (direzione positiva), aumenta probabilità chiusura
+                if direction > 0.005:  # Sale più di 0.5%
+                    momentum_factor = min(0.25, direction * 10)
+                elif direction < -0.01:  # Scende più di 1% → lascia correre
+                    momentum_factor = -0.15
+
+                # Extra: se uno dei high futuri sale sopra entry, chiudi!
+                if any(high > entry_price for high in future_highs):
+                    momentum_factor += 0.20
+
+        # === FATTORE 4: FUTURE RISK (0.0 - 0.30) ===
+        future_risk_factor = 0.0
+        if future_candles and len(future_candles) >= 5 and sl_price:
+            if subtype == 'buy':
+                # Se nelle prossime candele il low tocca lo SL, forte rischio
+                future_lows = [float(c['low']) for c in future_candles[:8]]
+                min_future_low = min(future_lows) if future_lows else current_price
+
+                # Quanto vicino allo SL arriviamo?
+                if sl_price > 0:
+                    distance_to_sl = (current_price - sl_price) / current_price
+                    future_distance_to_sl = (min_future_low - sl_price) / current_price if current_price > 0 else 0
+
+                    # Se il futuro low è più vicino allo SL di quanto siamo ora
+                    if future_distance_to_sl < distance_to_sl * 0.5:
+                        future_risk_factor = 0.20
+                    if min_future_low <= sl_price:
+                        future_risk_factor = 0.30  # SL verrà colpito! Chiudi ora
+            else:  # sell
+                future_highs = [float(c['high']) for c in future_candles[:8]]
+                max_future_high = max(future_highs) if future_highs else current_price
+
+                if sl_price > 0:
+                    distance_to_sl = (sl_price - current_price) / current_price
+                    future_distance_to_sl = (sl_price - max_future_high) / current_price if current_price > 0 else 0
+
+                    if future_distance_to_sl < distance_to_sl * 0.5:
+                        future_risk_factor = 0.20
+                    if max_future_high >= sl_price:
+                        future_risk_factor = 0.30
+
+        # === COMBINA I FATTORI ===
+        # Probabilità base: parte dal fattore PnL
+        total_probability = pnl_factor + progress_factor + momentum_factor + future_risk_factor
+
+        # Clamp finale a [0, 0.95] (non mai 100% certo)
+        total_probability = max(0.0, min(0.95, total_probability))
+
+        # === OVERRIDE PER PNL MOLTO ALTI ===
+        # Se PnL effettivo è molto alto, forza probabilità alta
+        if effective_pnl_pct >= VERY_HIGH_PNL_PCT:
+            total_probability = max(total_probability, 0.85)
+        elif effective_pnl_pct >= HIGH_PNL_PCT:
+            total_probability = max(total_probability, 0.60)
+        elif effective_pnl_pct >= GOOD_PNL_PCT:
+            total_probability = max(total_probability, 0.35)
+
+        return total_probability
 
     def _simulate_clarity_pnl(self, side: int, curr_price: float, futures: list,
                                tp_mult: float = 0.5, sl_mult: float = 0.5) -> float:
@@ -147,7 +301,7 @@ class TradingTrainer:
             return None
 
         # Parametro di casualità: 40% di probabilità di avere un ordine aperto
-        if random.random() > 0.4:
+        if random.random() > 0.5:
             return None
 
         # Recuperiamo le candele 1h
@@ -341,11 +495,19 @@ class TradingTrainer:
                                 should_close = True
                                 break
 
-                    # 3. Random Profit Taking (20%)
-                    # Se siamo in profitto ma non a TP, a volte chiudiamo comunque
+                    # 3. SMART Profit Taking (basato su PnL%, momentum, future risk)
+                    # Usa algoritmo intelligente invece della probabilità fissa 20%
                     if not should_close:
-                        is_profitable = current_price > entry_price
-                        if is_profitable and random.random() < 0.20:
+                        close_prob = self._compute_smart_close_probability(
+                            entry_price=entry_price,
+                            current_price=current_price,
+                            tp_price=tp_price,
+                            sl_price=sl_price,
+                            future_candles=future_candles,
+                            subtype='buy',
+                            order_lev=order_lev
+                        )
+                        if close_prob > 0 and random.random() < close_prob:
                             should_close = True
 
                     # Azione
@@ -369,10 +531,19 @@ class TradingTrainer:
                                 should_close = True
                                 break
 
-                    # 3. Random Profit Taking (20%)
+                    # 3. SMART Profit Taking (basato su PnL%, momentum, future risk)
+                    # Usa algoritmo intelligente invece della probabilità fissa 20%
                     if not should_close:
-                        is_profitable = current_price < entry_price
-                        if is_profitable and random.random() < 0.20:
+                        close_prob = self._compute_smart_close_probability(
+                            entry_price=entry_price,
+                            current_price=current_price,
+                            tp_price=tp_price,
+                            sl_price=sl_price,
+                            future_candles=future_candles,
+                            subtype='sell',
+                            order_lev=order_lev
+                        )
+                        if close_prob > 0 and random.random() < close_prob:
                             should_close = True
 
                     # Azione

@@ -205,9 +205,9 @@ def train_loop():
     FORECAST_FORWARD_TF = "1d" # Quanto in avanti guardiamo per selezionare il forecast
 
     LOOKAHEAD_STEPS = 180  # 24 ore nel futuro per l'Oracolo (Target)
-    EPOCHS = 700
-    CACHE_LIMIT = 700000    # Candele storiche
-    FORECAST_CACHE_LIMIT = 700000 # Forecast limit
+    EPOCHS = 200
+    CACHE_LIMIT = 800000    # Candele storiche
+    FORECAST_CACHE_LIMIT = 800000 # Forecast limit
 
     # --- SETUP ---
     print("--- INIZIALIZZAZIONE DB E PROVIDER ---")
