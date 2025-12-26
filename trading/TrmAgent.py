@@ -297,16 +297,18 @@ class MultiTimeframeTRM(nn.Module):
         brain_input = self.extract_features(inputs)
         return self.think(brain_input, h)
 
-    def get_heads_dict(self, y):
+    def get_heads_dict(self, y, temperature: float = 1.0):
         """Restituisce le predizioni dalle heads - interfaccia per Trainer"""
+        # Temperature scaling per softmax-based heads
+        temp = max(0.1, temperature)  # Evita divisione per zero
         return {
-            "side": self.head_side(y),
+            "side": self.head_side(y) / temp,  # Scaled logits
             "qty": torch.sigmoid(self.head_qty(y)),
             "price_offset": torch.tanh(self.head_px(y)),
             "tp_mult": F.softplus(self.head_tp(y)),
             "sl_mult": F.softplus(self.head_sl(y)),
-            "halt_prob": torch.sigmoid(self.head_halt(y)),
-            "ordertype": self.head_ordertype(y),
+            "halt_prob": torch.sigmoid(self.head_halt(y) / temp), # Temperature sensitive halt
+            "ordertype": self.head_ordertype(y) / temp,  # Scaled logits
             "leverage": (F.softplus(self.head_lev(y)) + 1.0).clamp(1.0, 5.0)
         }
 

@@ -20,8 +20,8 @@ from trading.KrakenOrderRunner import KrakenOrderRunner
 # ==============================================================================
 
 # File dei pesi
-MODEL_PATH_HIGH = "model/trainerUpPnl.pth"
-MODEL_PATH_LOW  = "model/trainerLast.pth"
+MODEL_PATH_HIGH = "model/trainerUpPnlHalt.pth"
+MODEL_PATH_LOW  = "model/trainerLastHalt.pth"
 
 # Configurazione Timeframe
 TF_CONFIG_HIGH = {"1d": 30, "4h": 50, "1h": 100}
@@ -29,8 +29,14 @@ TF_CONFIG_LOW  = {"1h": 30, "15m": 50, "5m": 100}
 
 # Parametri del Thinking Loop
 THINKING_STEPS = 6
+THINKING_STEPS_EXTENDED = 15  # Deep Thinking steps
 MIN_STEPS = 2
 HALT_THRESHOLD = 0.70
+HALT_UNCERTAIN_THRESHOLD = 0.50  # Sotto questa, attiva Deep
+
+# Temperature settings
+TEMPERATURE_STANDARD = 1.0
+TEMPERATURE_DEEP = 0.5  # Più sicuro durante Deep Thinking
 
 STATE_FILE = "dual_brain_state.json"
 MODE = os.getenv("TRADING_MODE", "TEST").upper()
@@ -189,15 +195,15 @@ class BrainInstance:
         inputs_device = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v for k, v in inputs.items()}
 
         with torch.no_grad():
+            # === FASE 1: Standard Thinking (T=1.0) ===
             for k in range(THINKING_STEPS):
                 steps_taken = k + 1
                 y, h = self.model(inputs_device, h)
-                current_heads = self.model.get_heads_dict(y)
+                current_heads = self.model.get_heads_dict(y, temperature=TEMPERATURE_STANDARD)
                 halt_prob = current_heads['halt_prob'].item()
 
                 can_stop = (steps_taken >= MIN_STEPS)
                 # ---- HALT threshold schedule per-step ----
-                # primi step: serve più certezza per fermarsi; ultimi step: soglia più permissiva
                 t0 = 0.65  # subito dopo MIN_STEPS
                 t1 = 0.55  # verso l'ultimo step
 
@@ -208,7 +214,6 @@ class BrainInstance:
                     prog = 1.0
 
                 halt_thr_step = t0 + (t1 - t0) * prog
-                print(f"{self.print_prefix} {pair_data['pair']} Step {steps_taken}/{THINKING_STEPS} - Halt Prob: {halt_prob:.4f} vs Thr: {halt_thr_step:.4f}")
                 wants_to_stop = (halt_prob >= halt_thr_step)
                 forced_stop = (steps_taken == THINKING_STEPS)
 
@@ -220,6 +225,33 @@ class BrainInstance:
 
             if final_action is None:
                 final_action = decoder.decode(current_heads, THINKING_STEPS)
+
+            # === FASE 2: Deep Thinking (T=0.5) ===
+            decision = final_action.get('decision', 'HOLD') if isinstance(final_action, dict) else getattr(final_action, 'decision', 'HOLD')
+            if decision in ["BUY", "SELL"] and halt_prob < HALT_UNCERTAIN_THRESHOLD:
+                print(f"{self.print_prefix} {pair_data['pair']} 🧠 DEEP THINKING (halt={halt_prob:.4f})")
+
+                for k2 in range(THINKING_STEPS, THINKING_STEPS_EXTENDED):
+                    y, h = self.model(inputs_device, h)
+                    # Usa temperatura bassa per decisioni più nette
+                    current_heads = self.model.get_heads_dict(y, temperature=TEMPERATURE_DEEP)
+                    halt_prob = current_heads['halt_prob'].item()
+                    steps_ext = k2 + 1
+
+                    print(f"{self.print_prefix} {pair_data['pair']} Deep Step {steps_ext}/{THINKING_STEPS_EXTENDED} - Halt: {halt_prob:.4f}")
+
+                    if halt_prob >= HALT_UNCERTAIN_THRESHOLD:
+                        final_action = decoder.decode(current_heads, steps_ext)
+                        print(f"{self.print_prefix} {pair_data['pair']} ✅ DEEP OK at step {steps_ext}")
+                        break
+                else:
+                    print(f"{self.print_prefix} {pair_data['pair']} ⛔ DEEP ABORT: forcing HOLD")
+                    if isinstance(final_action, dict):
+                        final_action['decision'] = 'HOLD'
+                        final_action['actionKraken'] = None
+                    else:
+                        final_action.decision = 'HOLD'
+                        final_action.actionKraken = None
 
         return final_action
 
@@ -522,7 +554,8 @@ def run_low_tf_job(brain: BrainInstance, state_mgr: StateManager, all_pairs):
     print(f"\n=== AVVIO JOB LOW-TF ===")
     db = DatabaseManager()
 
-    open_orders_rows = db.select_all("orders", "status = 'OPEN'")
+    where = f"status = 'OPEN' AND mode = '{MODE}'"
+    open_orders_rows = db.select_all("orders", where)
     open_positions_pairs = set(row['pair'] for row in open_orders_rows)
 
     state_mgr.clean_watchlist(open_positions_pairs)

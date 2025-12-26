@@ -511,15 +511,15 @@ def train_loop():
             if penalized_score > best_penalized_score + 1e-8:
                 print(f"🌟 NUOVO BEST SCORE (Old: {best_penalized_score:.4f} -> New: {penalized_score:.4f}) - Salvataggio...")
                 best_penalized_score = penalized_score
-                trainer.save_checkpoint("model/trainerUpPnl.pth")
+                trainer.save_checkpoint("model/trainerUpPnlHalt.pth")
             else:
-                trainer.save_checkpoint("model/trainerUpN.pth")
+                trainer.save_checkpoint("model/trainerUpNHalt.pth")
                 print(f"--- Nessun miglioramento SCORE (Best: {best_penalized_score:.4f}) ---")
 
-        db.close_connection()
+    db.close_connection()
 
-        # Plotting finale
-        plot_training_losses(loss_history)
+    # Plotting finale
+    plot_training_losses(loss_history)
 
 
 if __name__ == "__main__":

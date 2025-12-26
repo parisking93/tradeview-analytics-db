@@ -565,7 +565,7 @@ def train_loop():
                     preds_v = None
                     for s in range(trainer.thinking_steps):
                         y_v, h_v = model.think(brain_v, h_v)
-                        preds_v = model.get_heads_dict(y_v)
+                        preds_v = model.get_heads_dict(y_v, temperature=1.0)
 
                     current_price_v = float(context_v["candles"]["1h"][-1]["close"])
                     pnl_v, is_trade_v = simulate_pnl_from_preds(preds_v, current_price_v, future_segment_v, fee_rate=0.001, verbose=True)
@@ -605,9 +605,9 @@ def train_loop():
             if penalized_score > best_penalized_score + 1e-8:  # epsilon per evitare flip su valori molto vicini
                 print(f"🌟 NUOVO BEST SCORE (Old: {best_penalized_score:.4f} -> New: {penalized_score:.4f}) - Salvataggio...")
                 best_penalized_score = penalized_score
-                trainer.save_checkpoint("model/trainerBest.pth")
+                trainer.save_checkpoint("model/trainerBestHalt.pth")
             else:
-                trainer.save_checkpoint("model/trainerLast.pth")
+                trainer.save_checkpoint("model/trainerLastHalt.pth")
                 print(f"--- Nessun miglioramento SCORE (Best: {best_penalized_score:.4f}) ---")
 
     db.close_connection()

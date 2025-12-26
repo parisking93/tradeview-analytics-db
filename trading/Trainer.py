@@ -35,7 +35,7 @@ class TradingTrainer:
         # Carica pesi (Best effort)
         try:
         #     self.model.load_state_dict(torch.load("trm_model_v2.pth"), strict=False)
-            self.model.load_state_dict(torch.load("model/trainerBest.pth"), strict=False)
+            self.model.load_state_dict(torch.load("model/trainerLast.pth"), strict=False)
             print("--- Pesi 'Best Model' caricati ---")
         except:
             print("--- Nessun peso precedente, start fresh ---")
@@ -51,6 +51,10 @@ class TradingTrainer:
         # --- MULTISTEP THINKING ---
         # Numero di step di "pensiero" durante il training (unroll della GRUCell del cervello)
         self.thinking_steps = 5  # Ridotto da 7 per stabilità gradienti
+        self.thinking_steps_extended = 12  # Deep training steps
+        self.deep_thinking_prob = 0.20     # 20% delle volte allena Deep
+        self.temperature_standard = 1.0
+        self.temperature_deep = 0.5
 
         # --- LOSS FUNCTIONS SEPARATE ---
 
@@ -67,6 +71,71 @@ class TradingTrainer:
         # Counters to compute dynamic class weights for ordertype (0=LIMIT,1=MARKET)
         # Initialized to 1 to avoid division by zero
         self.type_counts = [1.0, 1.0]
+
+    def _compute_clarity_score(self, pnl_buy: float, pnl_sell: float, pnl_hold: float) -> float:
+        """
+        Calcola quanto è "chiara" la decisione migliore basandosi sul margine tra la miglior azione e la seconda.
+        """
+        pnl_values = [pnl_buy, pnl_sell, pnl_hold]
+        sorted_pnl = sorted(pnl_values, reverse=True)
+        best = sorted_pnl[0]
+        second_best = sorted_pnl[1]
+
+        # Margine normalizzato (quanto è migliore la prima rispetto alla seconda)
+        # Usiamo una scala di ~2% come riferimento (margine tipico di un buon trade)
+        margin = best - second_best
+        normalized_margin = margin / 0.02  # 2% = margine "chiaro"
+
+        # Sigmoid per mappare a [0, 1]
+        import math
+        clarity = 1.0 / (1.0 + math.exp(-3.0 * (normalized_margin - 1.0)))
+        return max(0.1, min(0.95, clarity))
+
+    def _simulate_clarity_pnl(self, side: int, curr_price: float, futures: list,
+                               tp_mult: float = 0.5, sl_mult: float = 0.5) -> float:
+        """
+        Simula il PnL per una data azione (BUY, SELL o HOLD) usando la stessa logica
+        dell'oracle avanzato (_compute_pnl_reward).
+        Implementazione basata su TP/SL e traiettoria completa (high/low).
+        """
+        if side == 2:  # HOLD
+            return 0.0
+        if not futures or len(futures) < 5:
+            return 0.0
+
+        entry = float(curr_price)
+        # TP/SL costanti per la misura di "chiarezza" (default conservativi)
+        tp_pct = max(0.004, min(tp_mult * 0.10, 0.50))
+        sl_pct = max(0.003, min(sl_mult * 0.05, 0.50))
+
+        if side == 0:  # BUY
+            tp = entry * (1.0 + tp_pct)
+            sl = entry * (1.0 - sl_pct)
+            exit_px = float(futures[-1]['close'])
+            for c in futures:
+                if float(c['low']) <= sl:
+                    exit_px = sl
+                    break
+                if float(c['high']) >= tp:
+                    exit_px = tp
+                    break
+            raw_ret = (exit_px - entry) / entry
+        else:  # SELL
+            tp = entry * (1.0 - tp_pct)
+            sl = entry * (1.0 + sl_pct)
+            exit_px = float(futures[-1]['close'])
+            for c in futures:
+                if float(c['high']) >= sl:
+                    exit_px = sl
+                    break
+                if float(c['low']) <= tp:
+                    exit_px = tp
+                    break
+            raw_ret = (entry - exit_px) / entry
+
+        # Sottraiamo fee_rate round-trip (approssimato 0.1% * 2)
+        net_ret = raw_ret - 0.002
+        return float(net_ret)
 
     def generate_fake_order(self, context, pair_limits):
         """
@@ -312,6 +381,12 @@ class TradingTrainer:
                         target_qty = 1.0
                         target_ordertype = 1 # Market
 
+                # === NUOVO: Calcola Clarity Score per halt_prob ===
+                pnl_buy = self._simulate_clarity_pnl(0, current_price, future_candles, 0.5, 0.5)
+                pnl_sell = self._simulate_clarity_pnl(1, current_price, future_candles, 0.5, 0.5)
+                pnl_hold = 0.0
+                target_halt_val = self._compute_clarity_score(pnl_buy, pnl_sell, pnl_hold)
+
                 # Restituzione tensori per Ordine Esistente
                 return {
                     "side": torch.tensor([target_side], dtype=torch.long),
@@ -323,8 +398,7 @@ class TradingTrainer:
                     "ordertype": torch.tensor([target_ordertype], dtype=torch.long),
                     # La leva DEVE essere quella dell'ordine per coerenza
                     "leverage": torch.tensor([order_lev], dtype=torch.float32).view(-1, 1),
-                    # Se holdiamo, halt_prob alto, se chiudiamo basso
-                    "halt_prob": torch.tensor([1.0 if target_side==2 else 0.0], dtype=torch.float32).view(-1, 1)
+                    "halt_prob": torch.tensor([target_halt_val], dtype=torch.float32).view(-1, 1)
                 }
 
 
@@ -426,7 +500,7 @@ class TradingTrainer:
             target_px_offset = 0.0
             target_ordertype = 1
             target_leverage = 1.0
-            target_halt = 0.95
+            target_halt = 0.50 # Default iniziale, verrà ricalcolato se buy/sell
 
             # Calcola ATR% per soglia dinamica MARKET/LIMIT (si adatta alla volatilità della currency)
             atr_pct_global = _estimate_atr_pct(highs[:8], lows[:8], closes[:8])
@@ -487,7 +561,6 @@ class TradingTrainer:
                 max_pair_lev = float(pair_limits.get('leverage_buy_max', 1.0)) if pair_limits else 1.0
                 safe_lev = min(raw_lev, max_pair_lev, 5.0)
                 target_leverage = safe_lev
-                target_halt = 0.05
 
             # --- LOGICA SELL ---
             elif (current_price - min(lows))/current_price > MIN_PROFIT_PCT:
@@ -530,7 +603,6 @@ class TradingTrainer:
                 max_pair_lev = float(pair_limits.get('leverage_sell_max', 1.0)) if pair_limits else 1.0
                 safe_lev = min(raw_lev, max_pair_lev, 5.0)
                 target_leverage = safe_lev
-                target_halt = 0.05
 
             # Ensure TP/SL targets result in at least MIN_TP/SL when decoded
             # Decoder uses pct = mult * 0.10 for TP, mult * 0.05 for SL
@@ -538,6 +610,10 @@ class TradingTrainer:
             # MIN_SL_PCT = 0.003 -> min_mult = 0.06
             target_tp_mult = max(0.04, min(target_tp_mult, 5.0))
             target_sl_mult = max(0.06, min(target_sl_mult, 5.0))
+
+            pnl_buy = self._simulate_clarity_pnl(0, current_price, future_candles, 0.5, 0.5)
+            pnl_sell = self._simulate_clarity_pnl(1, current_price, future_candles, 0.5, 0.5)
+            target_halt = self._compute_clarity_score(pnl_buy, pnl_sell, 0.0)
 
             return {
                 "side": torch.tensor([target_side], dtype=torch.long),
@@ -653,14 +729,24 @@ class TradingTrainer:
 
             last_preds = None
 
-            for s in range(self.thinking_steps):
+            # Decide se fare Deep Training in questo sample
+            use_deep = random.random() < self.deep_thinking_prob
+            max_steps = self.thinking_steps_extended if use_deep else self.thinking_steps
+
+            for s in range(max_steps):
+                # Temperature schedule: standard per primi step, deep dopo
+                if use_deep and s >= self.thinking_steps:
+                    temp = self.temperature_deep
+                else:
+                    temp = self.temperature_standard
+
                 # Peso: diamo piu importanza agli step finali
-                w = float(s + 1) / float(self.thinking_steps)
+                w = float(s + 1) / float(max_steps)
                 sum_w += w
 
                 # Forward step ricorrente del cervello centrale
                 y, h = self.model.think(brain_input, h)
-                preds = self.model.get_heads_dict(y)
+                preds = self.model.get_heads_dict(y, temperature=temp)
                 last_preds = preds
 
                 # --- SIDE Focal Loss (per-sample) ---
@@ -703,22 +789,29 @@ class TradingTrainer:
 
                 # ---- HALT focal BCE (stabile su class imbalance) ----
                 p = preds['halt_prob'].clamp(1e-4, 1.0 - 1e-4)   # evita log(0)
-                # ---- HALT target schedule per-step ----
-                t_final = t_halt.float()  # ~0.95 (HOLD) o ~0.05 (trade)
-                progress = float(s + 1) / float(self.thinking_steps)  # 0..1
-                HALT_START_HOLD = 0.20
-                HALT_START_TRADE = 0.02
-                t_start = torch.where(
-                    t_final >= 0.5,
-                    torch.full_like(t_final, HALT_START_HOLD),
-                    torch.full_like(t_final, HALT_START_TRADE)
-                )
-                t = (t_start + (t_final - t_start) * progress).clamp(0.0, 1.0)
+                # ---- HALT target schedule per-step (Clarity-based) ----
+                t_final = t_halt.float()  # clarity score [0.1, 0.95]
+                progress = float(s + 1) / float(max_steps)  # 0..1
+
+                # La velocità di convergenza dipende dalla clarity:
+                # - Alta clarity (segnale chiaro) → converge velocemente
+                # - Bassa clarity (segnale ambiguo) → converge lentamente
+                # speed range: cl=0.1 => sp=0.65, cl=0.95 => sp=1.92
+                speed = 0.5 + 1.5 * t_final.clamp(0.1, 0.95)
+                effective_progress = (progress * speed).clamp(0.0, 1.0)
+
+                # Start sempre basso, final = clarity target
+                HALT_START = 0.10
+                t = (torch.full_like(t_final, HALT_START) + (t_final - HALT_START) * effective_progress).clamp(0.0, 1.0)
                 bce = -(t * torch.log(p) + (1.0 - t) * torch.log(1.0 - p))
-                pt = torch.where(t >= 0.5, p, 1.0 - p)
-                alpha = torch.where(t >= 0.5,
-                                    torch.full_like(t, self.halt_alpha_pos),
-                                    torch.full_like(t, self.halt_alpha_neg))
+
+                # ---- Nuova Focal Loss continua per soft-targets ----
+                pt_high = p
+                pt_low = 1.0 - p
+                pt = t * pt_high + (1.0 - t) * pt_low
+
+                alpha = t * self.halt_alpha_pos + (1.0 - t) * self.halt_alpha_neg
+
                 loss_halt_step = (alpha * (1.0 - pt) ** self.halt_gamma * bce).mean()
                 loss_halt_step = self.halt_loss_weight * loss_halt_step
 
