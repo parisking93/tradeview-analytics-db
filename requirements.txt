@@ -1,0 +1,6 @@
+torch
+ccxt
+numpy
+pandas
+python-dotenv
+matplotlib>=3.5.0

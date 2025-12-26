@@ -21,14 +21,14 @@ from trading.KrakenOrderRunner import KrakenOrderRunner
 
 # File dei pesi
 MODEL_PATH_HIGH = "model/trainerUpPnl.pth"
-MODEL_PATH_LOW  = "model/trainerBest.pth"
+MODEL_PATH_LOW  = "model/trainerLast.pth"
 
 # Configurazione Timeframe
 TF_CONFIG_HIGH = {"1d": 30, "4h": 50, "1h": 100}
 TF_CONFIG_LOW  = {"1h": 30, "15m": 50, "5m": 100}
 
 # Parametri del Thinking Loop
-THINKING_STEPS = 7
+THINKING_STEPS = 6
 MIN_STEPS = 2
 HALT_THRESHOLD = 0.70
 
@@ -50,24 +50,31 @@ class StateManager:
 
     def load_state(self):
         """
-        Carica lo stato dal disco.
-        NOTA: Carica la Watchlist (lungo termine) ma RESETTA i conflitti (breve termine).
+        Resetta lo stato all'avvio (ambiente pulito).
+        Il JSON verrà popolato con gli ordini OPEN dal DB all'inizio del main loop.
         """
-        if os.path.exists(self.filepath):
-            try:
-                with open(self.filepath, 'r') as f:
-                    data = json.load(f)
-                    self.watchlist = data.get("watchlist", {})
-                    # FIX: Non carichiamo i vecchi conflitti. Si riparte da zero ad ogni avvio.
-                    self.conflicts = {}
-                print(f"[STATE] Stato caricato: {len(self.watchlist)} coppie in Watchlist. Conflitti resettati.")
-            except Exception as e:
-                print(f"[ERROR] Errore caricamento stato: {e}")
-                self.watchlist = {}
-                self.conflicts = {}
-        else:
-            self.watchlist = {}
-            self.conflicts = {}
+        self.watchlist = {}
+        self.conflicts = {}
+        print("[STATE] Stato resettato: ambiente pulito all'avvio.")
+
+    def populate_from_open_orders(self, open_orders_rows):
+        """
+        Popola la watchlist con gli ordini OPEN dal database.
+        Queste coppie saranno monitorate dal Low Branch.
+        """
+        for order in open_orders_rows:
+            pair = order.get("pair")
+            if pair and pair not in self.watchlist:
+                # Usa la direzione dell'ordine (subtype) come decisione
+                subtype = (order.get("subtype") or "buy").upper()
+                self.watchlist[pair] = {
+                    "added_at": datetime.now().isoformat(),
+                    "last_high_decision": subtype,
+                    "has_open_order": True  # Flag per identificare che proviene da ordine aperto
+                }
+        if open_orders_rows:
+            print(f"[STATE] Popolata watchlist con {len(open_orders_rows)} ordini OPEN dal DB.")
+        self.save_state()
 
     def save_state(self):
         try:
@@ -472,10 +479,19 @@ def record_conflict_event(pair, high_side, low_side, counter):
 # ==============================================================================
 
 def run_high_tf_job(brain: BrainInstance, state_mgr: StateManager, all_pairs):
-    print(f"\n=== AVVIO JOB HIGH-TF ({len(all_pairs)} pairs) ===")
     db = DatabaseManager()
 
-    for pair in all_pairs:
+    # Recupera gli ordini OPEN per escluderli dal ciclo High-TF
+    where = f"status = 'OPEN' AND mode = '{MODE}'"
+    open_orders_rows = db.select_all("orders", where)
+    open_positions_pairs = set(row['pair'] for row in open_orders_rows)
+
+    # Filtra le coppie: escludi quelle con ordini OPEN
+    pairs_to_analyze = [p for p in all_pairs if p['pair'] not in open_positions_pairs]
+
+    print(f"\n=== AVVIO JOB HIGH-TF ({len(pairs_to_analyze)}/{len(all_pairs)} pairs, escluse {len(open_positions_pairs)} con ordini OPEN) ===")
+
+    for pair in pairs_to_analyze:
         pair_name = pair['pair']
         base_currency = pair['base']
 
@@ -619,6 +635,12 @@ def main_loop_dual_brain():
     print("Caricamento coppie...")
     all_pairs = market_prov.getAllPairs(quote_filter="EUR", leverage_only=True)
     print(f"Trovate {len(all_pairs)} coppie EUR con leva.")
+
+    # Popola la watchlist con gli ordini OPEN dal DB (ambiente pulito + ordini esistenti)
+    db_init = DatabaseManager()
+    open_orders_rows = db_init.select_all("orders", "status = 'OPEN'")
+    state_mgr.populate_from_open_orders(open_orders_rows)
+    db_init.close_connection()
 
     last_high_run = None
     last_low_run = None

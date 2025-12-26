@@ -572,292 +572,360 @@ class TradingTrainer:
             random.seed(seed_val)
         except Exception:
             pass
+        # NOTA: Non azzeriamo i gradienti qui! Lo facciamo solo dopo l'accumulo.
 
-        # 0. Generazione Ordini Finti (Augmentation)
-        # Se non c'è un ordine, proviamo a generarne uno finto per insegnare al modello a gestire posizioni aperte
-        fake_order = self.generate_fake_order(context, pair_limits)
-        if fake_order:
-            context['order'] = fake_order
+        try:
+            # 0. Generazione Ordini Finti (Augmentation)
+            # Se non c'è un ordine, proviamo a generarne uno finto per insegnare al modello a gestire posizioni aperte
+            fake_order = self.generate_fake_order(context, pair_limits)
+            if fake_order:
+                context['order'] = fake_order
 
-        # 1. Simulazione Wallet (Uguale)
-        simulated_wallet = 0
-        if wallet:
-            simulated_wallet = wallet_budget
-        else:
-            if random.random() < 0.2:
-                simulated_wallet = random.uniform(0.1, 9.0)
+            # 1. Simulazione Wallet (Uguale)
+            simulated_wallet = 0
+            if wallet:
+                simulated_wallet = wallet_budget
             else:
-                simulated_wallet = random.uniform(20.0, 1000.0)
+                if random.random() < 0.2:
+                    simulated_wallet = random.uniform(0.1, 9.0)
+                else:
+                    simulated_wallet = random.uniform(20.0, 1000.0)
 
-        inputs, ref_price = self.vectorizer.vectorize(
-            candles_db_data=context['candles'],
-            open_order=context['order'], # Passiamo l'ordine (reale o finto)
-            forecast_db_data=context['forecast'],
-            pair_limits=pair_limits,
-            wallet_balance=simulated_wallet
-        )
-
-        device = next(self.model.parameters()).device
-        for k, v in inputs.items():
-            inputs[k] = v.to(device)
-
-        # 1. Estrazione Context (Transformer) - Run ONCE
-        brain_input = self.model.extract_features(inputs)
-
-        # Assegniamo i pesi focal
-        if self.side_weights.device != device:
-             self.side_weights = self.side_weights.to(device)
-
-        # 2. Labeling (come prima, targets una volta sola)
-        current_close = context['candles']['5m'][-1]['close']
-        targets = self.generate_oracle_label(
-            future_candles,
-            current_close,
-            simulated_wallet,
-            10.0,
-            pair_limits,
-            fake_order
-        )
-
-        if targets is None:
-            return None
-
-        t_side = targets['side'].to(device)
-        t_qty  = targets['qty'].to(device)
-        t_px   = targets['px_offset'].to(device)
-        t_tp   = targets['tp_mult'].to(device)
-        t_sl   = targets['sl_mult'].to(device)
-        t_type = targets['ordertype'].to(device)
-        t_lev  = targets['leverage'].to(device)
-        t_halt = targets['halt_prob'].to(device)
-
-        # 3. Loss Calcolo MULTISTEP
-        is_active = (t_side != 2).float().view(-1, 1)
-        is_limit = (t_type == 0).float().view(-1, 1)  # 0=LIMIT, 1=MARKET (target)
-
-        h = None
-        sum_w = 0.0
-
-        # Accumulatori inizializzati come tensori sul device
-        acc_loss_side = torch.tensor(0.0, device=device)
-        acc_loss_qty  = torch.tensor(0.0, device=device)
-        acc_loss_tp   = torch.tensor(0.0, device=device)
-        acc_loss_sl   = torch.tensor(0.0, device=device)
-        acc_loss_px   = torch.tensor(0.0, device=device)
-        acc_loss_lev  = torch.tensor(0.0, device=device)
-        acc_loss_type = torch.tensor(0.0, device=device)
-        acc_loss_halt = torch.tensor(0.0, device=device)
-        acc_loss_rl   = torch.tensor(0.0, device=device)
-
-        last_preds = None
-
-        for s in range(self.thinking_steps):
-            # Peso: diamo piu importanza agli step finali
-            w = float(s + 1) / float(self.thinking_steps)
-            sum_w += w
-
-            # Forward step ricorrente del cervello centrale
-            y, h = self.model.think(brain_input, h)
-            preds = self.model.get_heads_dict(y)
-            last_preds = preds
-
-            # --- SIDE Focal Loss (per-sample) ---
-            ce_side = self.loss_ce_side_raw(preds['side'], t_side) # [B]
-            probs_side = torch.softmax(preds['side'], dim=-1)
-            # px = probabilità assegnata alla classe target
-            px_side = probs_side.gather(1, t_side.view(-1, 1)).view(-1)
-            # alpha bilanciato per classe
-            alpha_side = self.side_weights.gather(0, t_side)
-            # Focal formula
-            loss_side_step = (alpha_side * (1.0 - px_side) ** self.side_gamma * ce_side).mean()
-
-            # queste hanno mask is_active -> diventano [B,1], le riduciamo con mean()
-            loss_qty_step = (self.loss_mse(preds['qty'], t_qty) * is_active).mean().squeeze()
-            loss_tp_step  = (self.loss_mse(preds['tp_mult'], t_tp) * is_active).mean().squeeze()
-            loss_sl_step  = (self.loss_mse(preds['sl_mult'], t_sl) * is_active).mean().squeeze()
-            # Importante: l'offset di prezzo ha senso SOLO quando il target è LIMIT.
-            # Se lo alleni anche su MARKET (dove il target è quasi sempre 0), il modello converge a offset≈0 anche quando sceglie LIMIT.
-            loss_px_step  = (self.loss_mse(preds['price_offset'], t_px) * is_active * is_limit).mean().squeeze()
-
-            pred_lev = preds['leverage'].clamp(1.0, 5.0)
-            t_lev_c  = t_lev.clamp(1.0, 5.0)
-            loss_lev_step = (self.loss_lev(pred_lev, t_lev_c) * is_active).mean().squeeze()  # scalare
-            # Dynamic weighted CrossEntropy for ordertype to mitigate class imbalance
-            # Update running counts of targets
-            try:
-                t_type_flat = t_type.view(-1)
-                t_type_item = int(t_type_flat[0].item())
-                if t_type_item in (0, 1):
-                    self.type_counts[t_type_item] += 1.0
-            except Exception:
-                pass
-
-            # Compute weight: give MARKET (idx=1) weight proportional to n_limit/n_market
-            w_market = float(self.type_counts[0] / (self.type_counts[1] + 1e-6))
-            w_market = max(0.1, min(w_market, 10.0))
-            weight_tensor = torch.tensor([1.0, w_market], device=device)
-
-            loss_type_step = F.cross_entropy(preds['ordertype'], t_type.view(-1), weight=weight_tensor).squeeze()
-
-            # ---- HALT focal BCE (stabile su class imbalance) ----
-            p = preds['halt_prob'].clamp(1e-4, 1.0 - 1e-4)   # evita log(0)
-            # ---- HALT target schedule per-step ----
-            t_final = t_halt.float()  # ~0.95 (HOLD) o ~0.05 (trade)
-            progress = float(s + 1) / float(self.thinking_steps)  # 0..1
-            HALT_START_HOLD = 0.20
-            HALT_START_TRADE = 0.02
-            t_start = torch.where(
-                t_final >= 0.5,
-                torch.full_like(t_final, HALT_START_HOLD),
-                torch.full_like(t_final, HALT_START_TRADE)
+            inputs, ref_price = self.vectorizer.vectorize(
+                candles_db_data=context['candles'],
+                open_order=context['order'], # Passiamo l'ordine (reale o finto)
+                forecast_db_data=context['forecast'],
+                pair_limits=pair_limits,
+                wallet_balance=simulated_wallet
             )
-            t = (t_start + (t_final - t_start) * progress).clamp(0.0, 1.0)
-            bce = -(t * torch.log(p) + (1.0 - t) * torch.log(1.0 - p))
-            pt = torch.where(t >= 0.5, p, 1.0 - p)
-            alpha = torch.where(t >= 0.5,
-                                torch.full_like(t, self.halt_alpha_pos),
-                                torch.full_like(t, self.halt_alpha_neg))
-            loss_halt_step = (alpha * (1.0 - pt) ** self.halt_gamma * bce).mean()
-            loss_halt_step = self.halt_loss_weight * loss_halt_step
 
-            # ---- RL REWARD CALCULATION ----
-            # Calcoliamo un reward basato sulla coerenza con il target oracle (proxy di profitto futuro)
-            # In futuro questo userà il PnL simulato reale.
-            with torch.no_grad():
-                pred_side_idx = torch.argmax(preds['side'], dim=-1)
-                # Reward positivo se azzecca il side, negativo altrimenti
-                step_reward = torch.where(pred_side_idx == t_side, 1.0, -1.0)
+            device = next(self.model.parameters()).device
+            for k, v in inputs.items():
+                inputs[k] = v.to(device)
 
-            # Aggiungiamo una loss di policy: minimizziamo -reward * log_prob
-            log_probs = F.log_softmax(preds['side'], dim=-1)
-            picked_log_probs = log_probs.gather(1, pred_side_idx.view(-1, 1)).view(-1)
-            loss_rl_step = -(step_reward * picked_log_probs).mean()
+            # 1. Estrazione Context (Transformer) - Run ONCE
+            brain_input = self.model.extract_features(inputs)
 
-            # Accumulo pesato
-            acc_loss_side = acc_loss_side + (w * loss_side_step)
-            acc_loss_qty  = acc_loss_qty  + (w * loss_qty_step)
-            acc_loss_tp   = acc_loss_tp   + (w * loss_tp_step)
-            acc_loss_sl   = acc_loss_sl   + (w * loss_sl_step)
-            acc_loss_px   = acc_loss_px   + (w * loss_px_step)
-            acc_loss_lev  = acc_loss_lev  + (w * loss_lev_step)
-            acc_loss_type = acc_loss_type + (w * loss_type_step)
-            acc_loss_halt = acc_loss_halt + (w * loss_halt_step)
-            acc_loss_rl   = acc_loss_rl   + (w * loss_rl_step)
+            # Assegniamo i pesi focal
+            if self.side_weights.device != device:
+                 self.side_weights = self.side_weights.to(device)
 
-        # Media pesata tra gli step
-        loss_side = acc_loss_side / sum_w
-        loss_qty  = acc_loss_qty  / sum_w
-        loss_tp   = acc_loss_tp   / sum_w
-        loss_sl   = acc_loss_sl   / sum_w
-        loss_px   = acc_loss_px   / sum_w
-        loss_lev  = acc_loss_lev  / sum_w
-        loss_type = acc_loss_type / sum_w
-        loss_halt = acc_loss_halt / sum_w
-        loss_rl   = acc_loss_rl   / sum_w
+            # 2. Labeling (come prima, targets una volta sola)
+            current_close = context['candles']['5m'][-1]['close']
+            targets = self.generate_oracle_label(
+                future_candles,
+                current_close,
+                simulated_wallet,
+                10.0,
+                pair_limits,
+                fake_order
+            )
 
-        # 4. Loss totale (stessi pesi di prima)
-        # 4. Loss totale (Ribilanciata per evitare dominanza MSE)
-        total_loss = (
-            4.0 * loss_side +  # Aumentato da 3.0
-            0.3 * loss_qty +   # Ridotto da 1.0
-            0.2 * loss_tp +    # Ridotto da 0.5
-            0.2 * loss_sl +    # Ridotto da 0.5
-            0.2 * loss_lev +
-            0.3 * loss_type +
-            0.1 * loss_px +
-            0.4 * loss_halt +
-            self.rl_weight * loss_rl
-        )
+            if targets is None:
+                return None
 
-        # --- GESTIONE GRADIENT ACCUMULATION ---
+            t_side = targets['side'].to(device)
+            t_qty  = targets['qty'].to(device)
+            t_px   = targets['px_offset'].to(device)
+            t_tp   = targets['tp_mult'].to(device)
+            t_sl   = targets['sl_mult'].to(device)
+            t_type = targets['ordertype'].to(device)
+            t_lev  = targets['leverage'].to(device)
+            t_halt = targets['halt_prob'].to(device)
 
-        # Normalizziamo la loss (perche sommeremo i gradienti 4 volte)
-        loss_normalized = total_loss / self.accumulation_steps
-        loss_normalized.backward()  # Accumula il gradiente
+            # 3. Loss Calcolo MULTISTEP
+            is_active = (t_side != 2).float().view(-1, 1)
+            is_limit = (t_type == 0).float().view(-1, 1)  # 0=LIMIT, 1=MARKET (target)
 
-        # Se abbiamo raggiunto il numero di step o siamo alla fine, aggiorniamo
-        if (current_step_idx + 1) % self.accumulation_steps == 0:
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-            self.optimizer.step()
-            self.optimizer.zero_grad()  # Resetta ORA, dopo l'update
-            # NOTA: Lo scheduler viene ora chiamato a fine epoca in RunTrainingGpu.py
-            # con la media della loss dell'epoca, NON qui per singolo sample.
+            h = None
+            sum_w = 0.0
 
-        # === CALCOLO DINAMICO DEL WALLET ===
-        # Aggiorna simulated_wallet in base alle azioni predette dal modello
-        updated_wallet = simulated_wallet
+            # Accumulatori inizializzati come tensori sul device
+            acc_loss_side = torch.tensor(0.0, device=device)
+            acc_loss_qty  = torch.tensor(0.0, device=device)
+            acc_loss_tp   = torch.tensor(0.0, device=device)
+            acc_loss_sl   = torch.tensor(0.0, device=device)
+            acc_loss_px   = torch.tensor(0.0, device=device)
+            acc_loss_lev  = torch.tensor(0.0, device=device)
+            acc_loss_type = torch.tensor(0.0, device=device)
+            acc_loss_halt = torch.tensor(0.0, device=device)
+            acc_loss_rl   = torch.tensor(0.0, device=device)
 
-        if last_preds is not None:
-            current_price = float(context['candles']['5m'][-1]['close'])
-            pred_side = torch.argmax(last_preds['side']).item()  # 0=BUY, 1=SELL, 2=HOLD
-            pred_qty = float(last_preds['qty'].clamp(0, 1).item())
-            pred_lev = float(last_preds['leverage'].clamp(1, 5).item())
+            last_preds = None
 
-            # CASO A: Ordine aperto (fake_order esiste)
-            if fake_order is not None:
-                entry_price = float(fake_order['price_entry'])
-                entry_qty = float(fake_order['qty'])
-                entry_lev = float(fake_order['lev'])
-                entry_side = 0 if fake_order['subtype'] == 'buy' else 1
+            for s in range(self.thinking_steps):
+                # Peso: diamo piu importanza agli step finali
+                w = float(s + 1) / float(self.thinking_steps)
+                sum_w += w
 
-                # Calcolo del PnL della posizione aperta
-                if entry_side == 0:  # LONG position
-                    pnl = (current_price - entry_price) * entry_qty
-                else:  # SHORT position
-                    pnl = (entry_price - current_price) * entry_qty
+                # Forward step ricorrente del cervello centrale
+                y, h = self.model.think(brain_input, h)
+                preds = self.model.get_heads_dict(y)
+                last_preds = preds
 
-                # Calcolo del margine bloccato (collaterale)
-                position_value = entry_price * entry_qty
-                margin_blocked = position_value / entry_lev
+                # --- SIDE Focal Loss (per-sample) ---
+                ce_side = self.loss_ce_side_raw(preds['side'], t_side) # [B]
+                probs_side = torch.softmax(preds['side'], dim=-1)
+                # px = probabilità assegnata alla classe target
+                px_side = probs_side.gather(1, t_side.view(-1, 1)).view(-1)
+                # alpha bilanciato per classe
+                alpha_side = self.side_weights.gather(0, t_side)
+                # Focal formula
+                loss_side_step = (alpha_side * (1.0 - px_side) ** self.side_gamma * ce_side).mean()
 
-                # Se il modello intende chiudere la posizione (pred_side opposto)
-                if (entry_side == 0 and pred_side == 1) or (entry_side == 1 and pred_side == 0):
-                    # CHIUSURA: restituisci il margine + il PnL
-                    updated_wallet = simulated_wallet + margin_blocked + pnl
+                # queste hanno mask is_active -> diventano [B,1], le riduciamo con mean()
+                loss_qty_step = (self.loss_mse(preds['qty'], t_qty) * is_active).mean().squeeze()
+                loss_tp_step  = (self.loss_mse(preds['tp_mult'], t_tp) * is_active).mean().squeeze()
+                loss_sl_step  = (self.loss_mse(preds['sl_mult'], t_sl) * is_active).mean().squeeze()
+                # Importante: l'offset di prezzo ha senso SOLO quando il target è LIMIT.
+                # Se lo alleni anche su MARKET (dove il target è quasi sempre 0), il modello converge a offset≈0 anche quando sceglie LIMIT.
+                loss_px_step  = (self.loss_mse(preds['price_offset'], t_px) * is_active * is_limit).mean().squeeze()
 
-                # Se il modello intende HOLD la posizione aperta
-                elif pred_side == 2:
-                    # HOLD: nessun cambio, mantieni il wallet
-                    updated_wallet = simulated_wallet
+                pred_lev = preds['leverage'].clamp(1.0, 5.0)
+                t_lev_c  = t_lev.clamp(1.0, 5.0)
+                loss_lev_step = (self.loss_lev(pred_lev, t_lev_c) * is_active).mean().squeeze()  # scalare
+                # Dynamic weighted CrossEntropy for ordertype to mitigate class imbalance
+                # Update running counts of targets
+                try:
+                    t_type_flat = t_type.view(-1)
+                    t_type_item = int(t_type_flat[0].item())
+                    if t_type_item in (0, 1):
+                        self.type_counts[t_type_item] += 1.0
+                except Exception:
+                    pass
 
-            # CASO B: Nessun ordine aperto (fresh entry)
-            else:
-                if pred_side == 0 or pred_side == 1:  # BUY o SELL
-                    if pred_qty > 0.01:  # Solo se qty significativa
-                        # APERTURA POSIZIONE: blocca margine
-                        # Assumendo notional di 100€ * pred_qty * pred_lev
-                        notional = 30.0 * pred_qty * pred_lev
-                        margin_required = notional / pred_lev
-                        updated_wallet = simulated_wallet - margin_required
-                elif pred_side == 2:  # HOLD
-                    # Nessun ordine aperto, HOLD = no change
-                    updated_wallet = simulated_wallet
+                # Compute weight: give MARKET (idx=1) weight proportional to n_limit/n_market
+                w_market = float(self.type_counts[0] / (self.type_counts[1] + 1e-6))
+                w_market = max(0.1, min(w_market, 10.0))
+                weight_tensor = torch.tensor([1.0, w_market], device=device)
 
-        # Clamp del wallet (non può diventare negativo, minimo 0.1)
-        updated_wallet = max(0.1, updated_wallet)
+                loss_type_step = F.cross_entropy(preds['ordertype'], t_type.view(-1), weight=weight_tensor).squeeze()
 
-        return {
-            "loss": total_loss.item(),
-            "loss_side": loss_side.item(),
-            "loss_qty": loss_qty.item(),
-            "loss_tp": loss_tp.item(),
-            "loss_sl": loss_sl.item(),
-            "loss_px": loss_px.item(),
-            "loss_lev": loss_lev.item(),
-            "loss_type": loss_type.item(),
-            "loss_halt": loss_halt.item(),
-            "loss_rl": loss_rl.item(),
-            "target_side": t_side.item(),
-            "pred_side": torch.argmax(last_preds['side']).item() if last_preds is not None else -1,
-            "simulated_wallet": updated_wallet
-        }
+                # ---- HALT focal BCE (stabile su class imbalance) ----
+                p = preds['halt_prob'].clamp(1e-4, 1.0 - 1e-4)   # evita log(0)
+                # ---- HALT target schedule per-step ----
+                t_final = t_halt.float()  # ~0.95 (HOLD) o ~0.05 (trade)
+                progress = float(s + 1) / float(self.thinking_steps)  # 0..1
+                HALT_START_HOLD = 0.20
+                HALT_START_TRADE = 0.02
+                t_start = torch.where(
+                    t_final >= 0.5,
+                    torch.full_like(t_final, HALT_START_HOLD),
+                    torch.full_like(t_final, HALT_START_TRADE)
+                )
+                t = (t_start + (t_final - t_start) * progress).clamp(0.0, 1.0)
+                bce = -(t * torch.log(p) + (1.0 - t) * torch.log(1.0 - p))
+                pt = torch.where(t >= 0.5, p, 1.0 - p)
+                alpha = torch.where(t >= 0.5,
+                                    torch.full_like(t, self.halt_alpha_pos),
+                                    torch.full_like(t, self.halt_alpha_neg))
+                loss_halt_step = (alpha * (1.0 - pt) ** self.halt_gamma * bce).mean()
+                loss_halt_step = self.halt_loss_weight * loss_halt_step
 
-        # --- RIPRISTINO STATO RNG ---
-        # Cruciale: ripristiniamo lo stato RNG per non corrompere random.shuffle() nel loop principale
-        if hasattr(self, '_rng_state_backup'):
-            random.setstate(self._rng_state_backup)
+                # ---- RL REWARD: TRUE PnL-BASED ----
+                # Simulate actual PnL from current predictions against future candles.
+                # This replaces the naive "imitation" reward (pred == target).
+                with torch.no_grad():
+                    pred_side_idx = torch.argmax(preds['side'], dim=-1)
 
-        return result
+                    # Simulate PnL for this prediction
+                    pnl_reward, is_trade = self._compute_pnl_reward(
+                        preds, current_close, future_candles
+                    )
+                    # Scale PnL to reward: divide by 10€, clamp to [-2, 2]
+                    step_reward = torch.tensor(
+                        max(-2.0, min(2.0, pnl_reward / 10.0)),
+                        device=device
+                    )
+
+                # Policy gradient loss: -reward * log_prob (REINFORCE)
+                log_probs = F.log_softmax(preds['side'], dim=-1)
+                picked_log_probs = log_probs.gather(1, pred_side_idx.view(-1, 1)).view(-1)
+                loss_rl_step = -(step_reward * picked_log_probs).mean()
+
+                # Accumulo pesato
+                acc_loss_side = acc_loss_side + (w * loss_side_step)
+                acc_loss_qty  = acc_loss_qty  + (w * loss_qty_step)
+                acc_loss_tp   = acc_loss_tp   + (w * loss_tp_step)
+                acc_loss_sl   = acc_loss_sl   + (w * loss_sl_step)
+                acc_loss_px   = acc_loss_px   + (w * loss_px_step)
+                acc_loss_lev  = acc_loss_lev  + (w * loss_lev_step)
+                acc_loss_type = acc_loss_type + (w * loss_type_step)
+                acc_loss_halt = acc_loss_halt + (w * loss_halt_step)
+                acc_loss_rl   = acc_loss_rl   + (w * loss_rl_step)
+
+            # Media pesata tra gli step
+            loss_side = acc_loss_side / sum_w
+            loss_qty  = acc_loss_qty  / sum_w
+            loss_tp   = acc_loss_tp   / sum_w
+            loss_sl   = acc_loss_sl   / sum_w
+            loss_px   = acc_loss_px   / sum_w
+            loss_lev  = acc_loss_lev  / sum_w
+            loss_type = acc_loss_type / sum_w
+            loss_halt = acc_loss_halt / sum_w
+            loss_rl   = acc_loss_rl   / sum_w
+
+            # 4. Loss totale (stessi pesi di prima)
+            # 4. Loss totale (Ribilanciata per evitare dominanza MSE)
+            total_loss = (
+                4.0 * loss_side +  # Aumentato da 3.0
+                0.3 * loss_qty +   # Ridotto da 1.0
+                0.2 * loss_tp +    # Ridotto da 0.5
+                0.2 * loss_sl +    # Ridotto da 0.5
+                0.2 * loss_lev +
+                0.3 * loss_type +
+                0.1 * loss_px +
+                0.4 * loss_halt +
+                self.rl_weight * loss_rl
+            )
+
+            # --- GESTIONE GRADIENT ACCUMULATION ---
+
+            # Normalizziamo la loss (perche sommeremo i gradienti 4 volte)
+            loss_normalized = total_loss / self.accumulation_steps
+            loss_normalized.backward()  # Accumula il gradiente
+
+            # Se abbiamo raggiunto il numero di step o siamo alla fine, aggiorniamo
+            if (current_step_idx + 1) % self.accumulation_steps == 0:
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                self.optimizer.step()
+                self.optimizer.zero_grad()  # Resetta ORA, dopo l'update
+                # NOTA: Lo scheduler viene ora chiamato a fine epoca in RunTrainingGpu.py
+                # con la media della loss dell'epoca, NON qui per singolo sample.
+
+            # === CALCOLO DINAMICO DEL WALLET ===
+            # Aggiorna simulated_wallet in base alle azioni predette dal modello
+            updated_wallet = simulated_wallet
+
+            if last_preds is not None:
+                current_price = float(context['candles']['5m'][-1]['close'])
+                pred_side = torch.argmax(last_preds['side']).item()  # 0=BUY, 1=SELL, 2=HOLD
+                pred_qty = float(last_preds['qty'].clamp(0, 1).item())
+                pred_lev = float(last_preds['leverage'].clamp(1, 5).item())
+
+                # CASO A: Ordine aperto (fake_order esiste)
+                if fake_order is not None:
+                    entry_price = float(fake_order['price_entry'])
+                    entry_qty = float(fake_order['qty'])
+                    entry_lev = float(fake_order['lev'])
+                    entry_side = 0 if fake_order['subtype'] == 'buy' else 1
+
+                    # Calcolo del PnL della posizione aperta
+                    if entry_side == 0:  # LONG position
+                        pnl = (current_price - entry_price) * entry_qty
+                    else:  # SHORT position
+                        pnl = (entry_price - current_price) * entry_qty
+
+                    # Calcolo del margine bloccato (collaterale)
+                    position_value = entry_price * entry_qty
+                    margin_blocked = position_value / entry_lev
+
+                    # Se il modello intende chiudere la posizione (pred_side opposto)
+                    if (entry_side == 0 and pred_side == 1) or (entry_side == 1 and pred_side == 0):
+                        # CHIUSURA: restituisci il margine + il PnL
+                        updated_wallet = simulated_wallet + margin_blocked + pnl
+
+                    # Se il modello intende HOLD la posizione aperta
+                    elif pred_side == 2:
+                        # HOLD: nessun cambio, mantieni il wallet
+                        updated_wallet = simulated_wallet
+
+                # CASO B: Nessun ordine aperto (fresh entry)
+                else:
+                    if pred_side == 0 or pred_side == 1:  # BUY o SELL
+                        if pred_qty > 0.01:  # Solo se qty significativa
+                            # APERTURA POSIZIONE: blocca margine
+                            # Assumendo notional di 100€ * pred_qty * pred_lev
+                            notional = 30.0 * pred_qty * pred_lev
+                            margin_required = notional / pred_lev
+                            updated_wallet = simulated_wallet - margin_required
+                    elif pred_side == 2:  # HOLD
+                        # Nessun ordine aperto, HOLD = no change
+                        updated_wallet = simulated_wallet
+
+            # Clamp del wallet (non può diventare negativo, minimo 0.1)
+            updated_wallet = max(0.1, updated_wallet)
+
+            return {
+                "loss": total_loss.item(),
+                "loss_side": loss_side.item(),
+                "loss_qty": loss_qty.item(),
+                "loss_tp": loss_tp.item(),
+                "loss_sl": loss_sl.item(),
+                "loss_px": loss_px.item(),
+                "loss_lev": loss_lev.item(),
+                "loss_type": loss_type.item(),
+                "loss_halt": loss_halt.item(),
+                "loss_rl": loss_rl.item(),
+                "target_side": t_side.item(),
+                "pred_side": torch.argmax(last_preds['side']).item() if last_preds is not None else -1,
+                "simulated_wallet": updated_wallet
+            }
+
+        finally:
+            # --- RIPRISTINO STATO RNG ---
+            # Cruciale: ripristiniamo lo stato RNG per non corrompere random.shuffle() nel loop principale
+            if hasattr(self, '_rng_state_backup'):
+                random.setstate(self._rng_state_backup)
+
+
+    def _compute_pnl_reward(self, preds, current_price, future_candles, fee_rate=0.001):
+        """
+        Compute simulated PnL for a given prediction.
+        Returns (pnl_float, is_trade_int).
+        """
+        if not future_candles or len(future_candles) < 5:
+            return 0.0, 0
+
+        side = int(torch.argmax(preds["side"]).item())
+        if side == 2:  # HOLD
+            return 0.0, 0
+
+        # Extract prediction values
+        qty_frac = float(preds["qty"].clamp(0, 1).item())
+        lev = float(preds["leverage"].clamp(1, 5).item())
+        tp_mult = float(preds["tp_mult"].clamp(0, 10).item())
+        sl_mult = float(preds["sl_mult"].clamp(0, 10).item())
+
+        notional = 100.0 * qty_frac * lev
+        entry = float(current_price)
+
+        if notional <= 0.0 or entry <= 0.0:
+            return 0.0, 0
+
+        # TP/SL percentages (simplified, consistent with Decoder)
+        tp_pct = max(0.004, min(tp_mult * 0.10, 0.50))
+        sl_pct = max(0.003, min(sl_mult * 0.05, 0.50))
+
+        # Simulate exit price based on TP/SL hitting
+        if side == 0:  # BUY
+            tp = entry * (1.0 + tp_pct)
+            sl = entry * (1.0 - sl_pct)
+            exit_px = float(future_candles[-1]["close"])
+            for c in future_candles:
+                if float(c["low"]) <= sl:
+                    exit_px = sl
+                    break
+                if float(c["high"]) >= tp:
+                    exit_px = tp
+                    break
+            raw_ret = (exit_px - entry) / entry
+        else:  # SELL
+            tp = entry * (1.0 - tp_pct)
+            sl = entry * (1.0 + sl_pct)
+            exit_px = float(future_candles[-1]["close"])
+            for c in future_candles:
+                if float(c["high"]) >= sl:
+                    exit_px = sl
+                    break
+                if float(c["low"]) <= tp:
+                    exit_px = tp
+                    break
+            raw_ret = (entry - exit_px) / entry
+
+        net_ret = raw_ret - 2.0 * fee_rate
+        return float(notional * net_ret), 1
+
 
     def save_checkpoint(self, path="model/model_checkpoint.pth"):
         os.makedirs(os.path.dirname(path), exist_ok=True)

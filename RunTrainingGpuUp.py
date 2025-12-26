@@ -26,6 +26,7 @@ from db.MarketDataProvider import MarketDataProvider
 from trading.Vectorizer import DataVectorizer, VectorizerConfig
 from trading.TrmAgent import MultiTimeframeTRM
 from trading.TrainerUp import TradingTrainer
+from utils.plotting import plot_training_losses
 
 def add_timeframe_py(dt_obj, timeframe_str):
     """
@@ -226,6 +227,7 @@ def train_loop():
     moving_avg_loss = 0.0
     best_penalized_score = float('-inf')  # Inizializa a -inf per accettare qualunque score
     global_step = 0
+    loss_history = []
 
     for epoch in range(EPOCHS):
         print(f"\n=== EPOCH {epoch+1}/{EPOCHS} ===")
@@ -352,6 +354,7 @@ def train_loop():
                 moving_avg_loss = 0.99 * moving_avg_loss + 0.01 * loss if global_step > 1 else loss
 
                 if global_step % 10 == 0:
+                    loss_history.append({k: (v if not hasattr(v, 'item') else v.item()) for k, v in metrics.items() if k.startswith('loss')})
                     side_str = ["BUY", "SELL", "HOLD"][metrics['target_side']]
                     pred_str = ["BUY", "SELL", "HOLD"][metrics['pred_side']]
                     print(f"[Ep {epoch+1}][Step {global_step}] {pair_name} | Loss: {loss:.4f} (Avg: {moving_avg_loss:.4f}) | RL Loss: {metrics.get('loss_rl', 0):.4f} | T: {side_str} vs P: {pred_str}")
@@ -514,6 +517,9 @@ def train_loop():
                 print(f"--- Nessun miglioramento SCORE (Best: {best_penalized_score:.4f}) ---")
 
         db.close_connection()
+
+        # Plotting finale
+        plot_training_losses(loss_history)
 
 
 if __name__ == "__main__":

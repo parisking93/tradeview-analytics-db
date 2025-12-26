@@ -26,6 +26,7 @@ from db.MarketDataProvider import MarketDataProvider
 from trading.Vectorizer import DataVectorizer, VectorizerConfig
 from trading.TrmAgent import MultiTimeframeTRM
 from trading.Trainer import TradingTrainer
+from utils.plotting import plot_training_losses
 
 def add_timeframe_py(dt_obj, timeframe_str):
     """
@@ -205,8 +206,8 @@ def train_loop():
 
     LOOKAHEAD_STEPS = 180  # 24 ore nel futuro per l'Oracolo (Target)
     EPOCHS = 700
-    CACHE_LIMIT = 500000    # Candele storiche
-    FORECAST_CACHE_LIMIT = 500000 # Forecast limit
+    CACHE_LIMIT = 700000    # Candele storiche
+    FORECAST_CACHE_LIMIT = 700000 # Forecast limit
 
     # --- SETUP ---
     print("--- INIZIALIZZAZIONE DB E PROVIDER ---")
@@ -302,6 +303,7 @@ def train_loop():
     moving_avg_loss = 0.0
     best_penalized_score = float('-inf')  # Inizializa a -inf per accettare qualunque score
     global_step = 0
+    loss_history = []
 
     for epoch in range(EPOCHS):
         print(f"\n=== EPOCH {epoch+1}/{EPOCHS} ===")
@@ -441,6 +443,7 @@ def train_loop():
                 moving_avg_loss = 0.99 * moving_avg_loss + 0.01 * loss if global_step > 1 else loss
 
                 if global_step % 10 == 0:
+                    loss_history.append({k: (v if not hasattr(v, 'item') else v.item()) for k, v in metrics.items() if k.startswith('loss')})
                     side_str = ["BUY", "SELL", "HOLD"][metrics['target_side']]
                     pred_str = ["BUY", "SELL", "HOLD"][metrics['pred_side']]
                     # Loggare le loss per head
@@ -607,7 +610,10 @@ def train_loop():
                 trainer.save_checkpoint("model/trainerLast.pth")
                 print(f"--- Nessun miglioramento SCORE (Best: {best_penalized_score:.4f}) ---")
 
-        db.close_connection()
+    db.close_connection()
+
+    # Plotting finale
+    plot_training_losses(loss_history)
 
 if __name__ == "__main__":
     train_loop()
