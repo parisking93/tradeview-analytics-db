@@ -110,6 +110,31 @@ class DataVectorizer:
         except Exception:
             return [0.0, 0.0, 0.0, 0.0]
 
+    def _encode_subtype(self, subtype: Any) -> float:
+        """Encodes buy/sell as float."""
+        if not subtype: return 0.0
+        s = str(subtype).lower()
+        if 'buy' in s: return 1.0
+        if 'sell' in s: return -1.0
+        return 0.0
+
+    def _encode_status(self, status: Any) -> float:
+        """Encodes status as float."""
+        if not status: return 0.0
+        s = str(status).upper()
+        if 'OPEN' in s: return 1.0
+        if 'CLOSED' in s: return -1.0
+        if 'PENDING' in s: return 0.5
+        return 0.0
+
+    def _encode_ordertype(self, otype: Any) -> float:
+        """Encodes ordertype (LIMIT/MARKET) as float."""
+        if not otype: return 0.0
+        s = str(otype).upper()
+        if 'LIMIT' in s: return 1.0
+        if 'MARKET' in s: return -1.0
+        return 0.0
+
     def _vectorize_row(self, row: Dict[str, Any], col_numeric: List[str], col_string: List[str], col_time: List[str], ref_price: float) -> List[float]:
         feats = []
 
@@ -117,7 +142,6 @@ class DataVectorizer:
         for col in col_numeric:
             raw_val = self._safe_float(row.get(col))
 
-            # MODIFICA 4: Rimosso check per 'id', lasciato solo volume
             if col == 'volume':
                 feats.append(math.log1p(max(0.0, raw_val)))
             elif col == 'rsi':
@@ -132,9 +156,25 @@ class DataVectorizer:
             else:
                 feats.append(raw_val)
 
-        # 2. Stringhe
+        # 2. Stringhe (Special Handling per colonne critiche)
         for col in col_string:
-            feats.append(self._hash_string(row.get(col)))
+            val = row.get(col)
+            # FIX: Explicit encoding for critical order fields enables the model to 'see' context
+            if col == 'subtype':
+                feats.append(self._encode_subtype(val))
+            elif col == 'status':
+                feats.append(self._encode_status(val))
+            elif col == 'orderType':
+                feats.append(self._encode_ordertype(val))
+            elif col == 'type': # 'type' in orders table is often redundant with subtype or margin/spot
+                # Mappa 'position' -> 0.5, 'position_margin' -> 1.0
+                s_type = str(val).lower() if val else ""
+                if "margin" in s_type: feats.append(1.0)
+                elif "position" in s_type: feats.append(0.5)
+                else: feats.append(0.0)
+            else:
+                # Fallback hashing per ID o nomi non critici (pair, base, quote)
+                feats.append(self._hash_string(val))
 
         # 3. Tempo
         for col in col_time:

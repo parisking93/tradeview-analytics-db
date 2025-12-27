@@ -478,9 +478,8 @@ class TradingTrainer:
 
                 # --- NUOVO: Gestione LIMIT PENDING ---
                 # Se l'ordine è LIMIT e status è OPEN, il target DEVE essere HOLD
-                # (non vogliamo che il modello replazzi continuamente ordini LIMIT pendenti)
                 if order_type_str == "LIMIT" and fake_order.get('status') == 'OPEN':
-                    return {
+                     return {
                         "side": torch.tensor([2], dtype=torch.long),  # HOLD
                         "qty": torch.tensor([0.0], dtype=torch.float32).view(-1, 1),
                         "px_offset": torch.tensor([0.0], dtype=torch.float32).view(-1, 1),
@@ -491,11 +490,16 @@ class TradingTrainer:
                         "halt_prob": torch.tensor([1.0], dtype=torch.float32).view(-1, 1)  # Massima priorità HOLD
                     }
 
-                # Target defaults: HOLD
-                target_side = 2
+                # FIX: Strict HOLD default if order exists (unless closing logic kicks in)
+                # Instead of setting variables, we initialize 'target_side' to 2 (HOLD)
+                # and only change it if a CLOSE condition is met.
+                target_side = 2 # HOLD
                 target_qty = 0.0
-                target_ordertype = 0 # Limit default
+                target_ordertype = 0
 
+                # IMPORTANT: If we are not closing, we MUST return side=2 (HOLD).
+                # The model must learn that if it has an order, the ONLY valid actions are HOLD or CLOSE.
+                # Opening a new order (side 0 or 1) is ILLEGAL here.
                 should_close = False
 
                 # --- LOGICA LONG (BUY) ---

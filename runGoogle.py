@@ -32,7 +32,7 @@ THINKING_STEPS = 6
 THINKING_STEPS_EXTENDED = 15  # Deep Thinking steps
 MIN_STEPS = 2
 HALT_THRESHOLD = 0.70
-HALT_UNCERTAIN_THRESHOLD = 0.61  # Sotto questa, attiva Deep
+HALT_UNCERTAIN_THRESHOLD = 0.618  # Sotto questa, attiva Deep
 
 # Temperature settings
 TEMPERATURE_STANDARD = 1.0
@@ -637,8 +637,10 @@ def run_low_tf_job(brain: BrainInstance, state_mgr: StateManager, all_pairs):
                     else:
                         continue
                 else:
-                    print(f"   [SKIP] {pair_name} ha gia un ordine aperto in esecuzione.")
                     _reset_blocked_attempt(pair_name)
+                    if (open_order.get("subType") == "sell" and decision_low == "SELL") or (open_order.get("subType") == "buy" and decision_low == "BUY"):
+                        print(f"   [SKIP] {pair_name} ha gia un ordine aperto in esecuzione.")
+                        continue # FIX: Prevent execution if order exists
             else:
                 _reset_blocked_attempt(pair_name)
                 continue
