@@ -434,10 +434,10 @@ def persist_order_to_db(action, context=None, pair_info=None, runner_results=Non
         # Determine current market price from context if available (prefer 5m close)
         current_price_ctx = None
         try:
-            current_price_ctx = float((context or {}).get('candles', {}).get('5m', [])[-1]['close'])
+            current_price_ctx = float((context or {}).get('candles', {}).get('5m', [])[0]['close'])
         except Exception:
             try:
-                current_price_ctx = float((context or {}).get('candles', {}).get('1h', [])[-1]['close'])
+                current_price_ctx = float((context or {}).get('candles', {}).get('1h', [])[0]['close'])
             except Exception:
                 current_price_ctx = None
 

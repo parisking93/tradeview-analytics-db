@@ -140,9 +140,9 @@ class TradingTrainer:
         #     return 0.0
 
         # === FATTORE 1: PNL% ===
-        # Sigmoid centrata a 6% (GOOD + 1%), scala più morbida
-        pnl_sigmoid_input = (effective_pnl_pct - 0.06) / 0.04
-        pnl_factor = 0.05 + 0.65 * (1.0 / (1.0 + math.exp(-pnl_sigmoid_input)))
+        # Sigmoid centrata a 3.5% (tra MIN 2% e GOOD 5%), scala più aggressiva
+        pnl_sigmoid_input = (effective_pnl_pct - 0.035) / 0.015
+        pnl_factor = 0.10 + 0.80 * (1.0 / (1.0 + math.exp(-pnl_sigmoid_input)))
 
         # === FATTORE 2: PROGRESS TO TP (0.0 - 0.25) ===
         progress_factor = 0.0
@@ -249,14 +249,16 @@ class TradingTrainer:
         # Clamp finale a [0, 0.95] (non mai 100% certo)
         total_probability = max(0.0, min(0.95, total_probability))
 
-        # === OVERRIDE PER PNL MOLTO ALTI ===
-        # Se PnL effettivo è molto alto, forza probabilità alta
+        # === OVERRIDE PER PNL MOLTO ALTI (Aggressivo) ===
+        # Se PnL è buono, aumentiamo drasticamente la probabilità di incassare
         if effective_pnl_pct >= VERY_HIGH_PNL_PCT:
-            total_probability = max(total_probability, 0.85)
+            total_probability = max(total_probability, 0.95)
         elif effective_pnl_pct >= HIGH_PNL_PCT:
-            total_probability = max(total_probability, 0.60)
+            total_probability = max(total_probability, 0.90)
         elif effective_pnl_pct >= GOOD_PNL_PCT:
-            total_probability = max(total_probability, 0.35)
+            total_probability = max(total_probability, 0.75)
+        elif effective_pnl_pct >= MIN_CLEAN_PNL:
+            total_probability = max(total_probability, 0.50)
 
         return total_probability
 
