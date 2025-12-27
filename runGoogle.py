@@ -683,7 +683,7 @@ def main_loop_dual_brain():
         now = datetime.now()
 
         # Job HighTF (Ogni 60 minuti)
-        if last_high_run is None or (now - last_high_run) >= timedelta(hours=1):
+        if last_high_run is None or (now - last_high_run) >= timedelta(minutes=30):
             try:
                 last_high_run = datetime.now()
                 run_high_tf_job(brain_high, state_mgr, all_pairs)
