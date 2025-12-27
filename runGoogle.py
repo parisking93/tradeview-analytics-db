@@ -36,7 +36,7 @@ HALT_UNCERTAIN_THRESHOLD = 0.61  # Sotto questa, attiva Deep
 
 # Temperature settings
 TEMPERATURE_STANDARD = 1.0
-TEMPERATURE_DEEP = 0.5  # Più sicuro durante Deep Thinking
+TEMPERATURE_DEEP = 0.54  # Più sicuro durante Deep Thinking
 
 STATE_FILE = "dual_brain_state.json"
 MODE = os.getenv("TRADING_MODE", "TEST").upper()
@@ -217,8 +217,22 @@ class BrainInstance:
                 forced_stop = (steps_taken == THINKING_STEPS)
 
                 temp_action = decoder.decode(current_heads, steps_taken)
-                print(f"{self.print_prefix} {pair_data['pair']} 🧠 HALT PROB: {halt_prob:.4f} threshold: {halt_thr_step} action: {temp_action['decision']} price: {temp_action['limit_price']} take_profit: {temp_action['take_profit']} stop_loss: {temp_action['stop_loss']}")
-                # print(f"{self.print_prefix} {pair_data['pair']} 🧠 ACTION: {temp_action}")
+                # Formatting and Colors for better debugging
+                C = {
+                    "RST": "\033[0m", "BLD": "\033[1m", "GRY": "\033[90m",
+                    "GRN": "\033[92m", "RED": "\033[91m", "YLW": "\033[93m",
+                    "CYN": "\033[96m", "BLU": "\033[94m"
+                }
+                act_c = C["GRN"] if temp_action['decision'] == "BUY" else C["RED"] if temp_action['decision'] == "SELL" else C["YLW"]
+                type_c = C["YLW"] if temp_action['ordertype'].upper() == "MARKET" else C["CYN"]
+
+                print(f"{C['BLD']}{self.print_prefix} {pair_data['pair']}{C['RST']} 🧠 "
+                      f"Halt: {C['CYN']}{halt_prob:.4f}{C['RST']} {C['GRY']}(thr:{halt_thr_step:.2f}){C['RST']} | "
+                      f"Type: {type_c}{temp_action['ordertype'].upper()}{C['RST']} | "
+                      f"Action: {act_c}{C['BLD']}{temp_action['decision']}{C['RST']} | "
+                      f"Price: {C['BLD']}{temp_action['limit_price']}{C['RST']} | "
+                      f"TP: {C['GRN']}{temp_action['take_profit']}{C['RST']} | "
+                      f"SL: {C['RED']}{temp_action['stop_loss']}{C['RST']}")
 
                 if can_stop and (wants_to_stop or forced_stop):
                     final_action = temp_action
@@ -230,7 +244,7 @@ class BrainInstance:
             # === FASE 2: Deep Thinking (T=0.5) ===
             decision = final_action.get('decision', 'HOLD') if isinstance(final_action, dict) else getattr(final_action, 'decision', 'HOLD')
             if decision in ["BUY", "SELL"] and halt_prob < HALT_UNCERTAIN_THRESHOLD:
-                print(f"{self.print_prefix} {pair_data['pair']} 🧠 DEEP THINKING (halt={halt_prob:.4f})")
+                print(f"{C['BLU']}{self.print_prefix}{C['RST']} {C['BLD']}{pair_data['pair']}{C['RST']} 🧪 {C['CYN']}DEEP THINKING{C['RST']} (current halt: {halt_prob:.4f})")
 
                 for k2 in range(THINKING_STEPS, THINKING_STEPS_EXTENDED):
                     y, h = self.model(inputs_device, h)
@@ -239,14 +253,24 @@ class BrainInstance:
                     halt_prob = current_heads['halt_prob'].item()
                     steps_ext = k2 + 1
 
-                    print(f"{self.print_prefix} {pair_data['pair']} Deep Step {steps_ext}/{THINKING_STEPS_EXTENDED} - Halt: {halt_prob:.4f}")
+                    temp_action = decoder.decode(current_heads, steps_ext)
+                    act_c = C["GRN"] if temp_action['decision'] == "BUY" else C["RED"] if temp_action['decision'] == "SELL" else C["YLW"]
+                    type_c = C["YLW"] if temp_action['ordertype'].upper() == "MARKET" else C["CYN"]
+
+                    print(f"{C['BLD']}{self.print_prefix} {pair_data['pair']}{C['RST']} └─ 🧠 └─ "
+                      f"Halt: {C['CYN']}{halt_prob:.4f}{C['RST']} {C['GRY']}(thr:{halt_thr_step:.2f}){C['RST']} | "
+                      f"Type: {type_c}{temp_action['ordertype'].upper()}{C['RST']} | "
+                      f"Action: {act_c}{C['BLD']}{temp_action['decision']}{C['RST']} | "
+                      f"Price: {C['BLD']}{temp_action['limit_price']}{C['RST']} | "
+                      f"TP: {C['GRN']}{temp_action['take_profit']}{C['RST']} | "
+                      f"SL: {C['RED']}{temp_action['stop_loss']}{C['RST']}")
 
                     if halt_prob >= HALT_UNCERTAIN_THRESHOLD:
                         final_action = decoder.decode(current_heads, steps_ext)
-                        print(f"{self.print_prefix} {pair_data['pair']} ✅ DEEP OK at step {steps_ext}")
+                        print(f"   {C['GRN']}✅ DEEP OK{C['RST']} at step {steps_ext}")
                         break
                 else:
-                    print(f"{self.print_prefix} {pair_data['pair']} ⛔ DEEP ABORT: forcing HOLD")
+                    print(f"   {C['RED']}⛔ DEEP ABORT{C['RST']}: forcing HOLD")
                     if isinstance(final_action, dict):
                         final_action['decision'] = 'HOLD'
                         final_action['actionKraken'] = None
