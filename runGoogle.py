@@ -638,7 +638,7 @@ def run_low_tf_job(brain: BrainInstance, state_mgr: StateManager, all_pairs):
                         continue
                 else:
                     _reset_blocked_attempt(pair_name)
-                    if (open_order.get("subType") == "sell" and decision_low == "SELL") or (open_order.get("subType") == "buy" and decision_low == "BUY"):
+                    if (open_order.get("subtype") == "sell" and decision_low == "SELL") or (open_order.get("subtype") == "buy" and decision_low == "BUY"):
                         print(f"   [SKIP] {pair_name} ha gia un ordine aperto in esecuzione.")
                         continue # FIX: Prevent execution if order exists
             else:
